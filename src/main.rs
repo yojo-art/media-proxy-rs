@@ -69,6 +69,9 @@ async fn get_file(
 		Ok(resp)=>resp,
 		Err(e)=>return (axum::http::StatusCode::BAD_GATEWAY,headers,format!("{:?}",e)).into_response(),
 	};
+	if q.r#static.is_some(){
+		return encode_single(headers,response_bytes);
+	}
 	encode(headers,response_bytes)
 }
 fn resize(img:DynamicImage)->DynamicImage{
@@ -183,4 +186,6 @@ pub struct ConfigFile{
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
 	url: String,
+	//#[serde(rename = "static")]
+	r#static:Option<String>,
 }
