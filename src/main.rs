@@ -1,9 +1,23 @@
 use std::{io::Write, net::SocketAddr, sync::Arc};
 
 use axum::{response::IntoResponse, Router};
+use futures::StreamExt;
 use image::{AnimationDecoder, DynamicImage, ImageDecoder};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug,Serialize,Deserialize)]
+pub struct ConfigFile{
+	bind_addr: String,
+	timeout:u64,
+	user_agent:String,
+	max_size:u64,
+}
+#[derive(Debug, Deserialize)]
+pub struct RequestParams{
+	url: String,
+	//#[serde(rename = "static")]
+	r#static:Option<String>,
+}
 fn main() {
 	let config_path=match std::env::var("FILES_PROXY_CONFIG_PATH"){
 		Ok(path)=>{
@@ -20,6 +34,7 @@ fn main() {
 			bind_addr: "0.0.0.0:12766".to_owned(),
 			timeout:1000,
 			user_agent: "https://github.com/yojo-art/media-proxy-rs".to_owned(),
+			max_size:256*1024*1024,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -65,10 +80,25 @@ async fn get_file(
 	add_remote_header("Content-Disposition",&mut headers,remote_headers);
 	add_remote_header("Content-Type",&mut headers,remote_headers);
 	headers.append("Content-Security-Policy","default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'".parse().unwrap());
-	let response_bytes=match resp.bytes().await{
-		Ok(resp)=>resp,
-		Err(e)=>return (axum::http::StatusCode::BAD_GATEWAY,headers,format!("{:?}",e)).into_response(),
-	};
+	let len_hint=resp.content_length().unwrap_or(2048.min(config.max_size));
+	if len_hint>config.max_size{
+		return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response()
+	}
+	let mut response_bytes=Vec::with_capacity(len_hint as usize);
+	let mut stream=resp.bytes_stream();
+	while let Some(x) = stream.next().await{
+		match x{
+			Ok(b)=>{
+				if response_bytes.len()+b.len()>config.max_size as usize{
+					return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response()
+				}
+				response_bytes.extend_from_slice(&b);
+			},
+			Err(e)=>{
+				return (axum::http::StatusCode::BAD_GATEWAY,headers,format!("{:?}",e)).into_response()
+			}
+		}
+	}
 	if q.r#static.is_some(){
 		return encode_single(headers,response_bytes);
 	}
@@ -78,7 +108,7 @@ fn resize(img:DynamicImage)->DynamicImage{
 	//todo
 	img
 }
-fn encode(mut headers: axum::http::HeaderMap,response_bytes:axum::body::Bytes)->axum::response::Response{
+fn encode(mut headers: axum::http::HeaderMap,response_bytes:Vec<u8>)->axum::response::Response{
 	let codec=image::guess_format(&response_bytes);
 	let codec=match codec{
 		Ok(codec) => codec,
@@ -154,7 +184,7 @@ fn encode_anim(mut headers: axum::http::HeaderMap,size:(u32,u32),frames:image::F
 	headers.append("Content-Type","image/webp".parse().unwrap());
 	(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
 }
-fn encode_single(mut headers: axum::http::HeaderMap,response_bytes:axum::body::Bytes)->axum::response::Response{
+fn encode_single(mut headers: axum::http::HeaderMap,response_bytes:Vec<u8>)->axum::response::Response{
 	let img=image::load_from_memory(&response_bytes);
 	let img=match img{
 		Ok(img)=>img,
@@ -176,16 +206,4 @@ fn encode_single(mut headers: axum::http::HeaderMap,response_bytes:axum::body::B
 			(axum::http::StatusCode::OK,headers,response_bytes).into_response()
 		}
 	}
-}
-#[derive(Debug,Serialize,Deserialize)]
-pub struct ConfigFile{
-	bind_addr: String,
-	timeout:u64,
-	user_agent:String,
-}
-#[derive(Debug, Deserialize)]
-pub struct RequestParams{
-	url: String,
-	//#[serde(rename = "static")]
-	r#static:Option<String>,
 }
