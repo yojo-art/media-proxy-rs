@@ -13,6 +13,7 @@ pub struct ConfigFile{
 	max_size:u64,
 	proxy:Option<String>,
 	filter_type:FilterType,
+	max_pixels:u32,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
@@ -58,6 +59,7 @@ fn main() {
 			max_size:256*1024*1024,
 			proxy:None,
 			filter_type:FilterType::Triangle,
+			max_pixels:2048,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -142,7 +144,7 @@ struct RequestContext{
 }
 impl RequestContext{
 	fn resize(&self,img:DynamicImage)->DynamicImage{
-		let max_pixels=2000;
+		let max_pixels=self.config.max_pixels;
 		let img=img.resize(max_pixels.min(img.width()),img.height().min(max_pixels),self.config.filter_type.into());
 		img
 	}
