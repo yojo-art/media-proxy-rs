@@ -12,12 +12,32 @@ pub struct ConfigFile{
 	user_agent:String,
 	max_size:u64,
 	proxy:Option<String>,
+	filter_type:FilterType,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
 	url: String,
 	//#[serde(rename = "static")]
 	r#static:Option<String>,
+}
+#[derive(Clone, Copy,Debug,Serialize,Deserialize)]
+enum FilterType{
+	Nearest,
+	Triangle,
+	CatmullRom,
+	Gaussian,
+	Lanczos3,
+}
+impl Into<image::imageops::FilterType> for FilterType{
+	fn into(self) -> image::imageops::FilterType {
+		match self {
+			FilterType::Nearest => image::imageops::Nearest,
+			FilterType::Triangle => image::imageops::Triangle,
+			FilterType::CatmullRom => image::imageops::CatmullRom,
+			FilterType::Gaussian => image::imageops::Gaussian,
+			FilterType::Lanczos3 => image::imageops::Lanczos3,
+		}
+	}
 }
 fn main() {
 	let config_path=match std::env::var("FILES_PROXY_CONFIG_PATH"){
@@ -37,6 +57,7 @@ fn main() {
 			user_agent: "https://github.com/yojo-art/media-proxy-rs".to_owned(),
 			max_size:256*1024*1024,
 			proxy:None,
+			filter_type:FilterType::Triangle,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -110,16 +131,19 @@ async fn get_file(
 		headers,
 		src_bytes:response_bytes,
 		parms:q,
+		config,
 	}.encode()
 }
 struct RequestContext{
 	headers:HeaderMap,
 	src_bytes:Vec<u8>,
 	parms:RequestParams,
+	config:Arc<ConfigFile>,
 }
 impl RequestContext{
 	fn resize(&self,img:DynamicImage)->DynamicImage{
-		//todo
+		let max_pixels=2000;
+		let img=img.resize(max_pixels.min(img.width()),img.height().min(max_pixels),self.config.filter_type.into());
 		img
 	}
 	fn encode(mut self)->axum::response::Response{
