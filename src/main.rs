@@ -11,6 +11,7 @@ pub struct ConfigFile{
 	timeout:u64,
 	user_agent:String,
 	max_size:u64,
+	proxy:Option<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
@@ -35,6 +36,7 @@ fn main() {
 			timeout:1000,
 			user_agent: "https://github.com/yojo-art/media-proxy-rs".to_owned(),
 			max_size:256*1024*1024,
+			proxy:None,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -43,9 +45,14 @@ fn main() {
 
 	let config=Arc::new(config);
 	let rt=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+	let client=reqwest::ClientBuilder::new();
+	let client=match &config.proxy{
+		Some(url)=>client.proxy(reqwest::Proxy::http(url).unwrap()),
+		None=>client,
+	};
+	let client=client.build().unwrap();
 	rt.block_on(async{
 		let http_addr:SocketAddr = config.bind_addr.parse().unwrap();
-		let client=reqwest::Client::new();
 		let app = Router::new();
 		let client0=client.clone();
 		let config0=config.clone();
