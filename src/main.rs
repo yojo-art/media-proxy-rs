@@ -1,6 +1,7 @@
 use std::{io::Write, net::SocketAddr, sync::Arc};
 
 use axum::{response::IntoResponse, Router};
+use image::{AnimationDecoder, DynamicImage, ImageDecoder};
 use serde::{Deserialize, Serialize};
 
 fn main() {
@@ -63,11 +64,115 @@ async fn get_file(
 	let remote_headers=resp.headers();
 	add_remote_header("Content-Disposition",&mut headers,remote_headers);
 	add_remote_header("Content-Type",&mut headers,remote_headers);
+	headers.append("Content-Security-Policy","default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'".parse().unwrap());
 	let response_bytes=match resp.bytes().await{
 		Ok(resp)=>resp,
 		Err(e)=>return (axum::http::StatusCode::BAD_GATEWAY,headers,format!("{:?}",e)).into_response(),
 	};
-	(axum::http::StatusCode::OK,headers,response_bytes).into_response()
+	encode(headers,response_bytes)
+}
+fn resize(img:DynamicImage)->DynamicImage{
+	//todo
+	img
+}
+fn encode(mut headers: axum::http::HeaderMap,response_bytes:axum::body::Bytes)->axum::response::Response{
+	let codec=image::guess_format(&response_bytes);
+	let codec=match codec{
+		Ok(codec) => codec,
+		Err(e) => {
+			headers.append("X-Codec-Error",format!("{:?}",e).parse().unwrap());
+			return (axum::http::StatusCode::OK,headers,response_bytes).into_response();
+		},
+	};
+	match codec{
+		image::ImageFormat::Png => {
+			let a=match image::codecs::png::PngDecoder::new(std::io::Cursor::new(&response_bytes)){
+				Ok(a)=>a,
+				Err(_)=>return encode_single(headers,response_bytes)
+			};
+			if !a.is_apng().unwrap(){
+				return encode_single(headers,response_bytes);
+			}
+			let size=a.dimensions();
+			match a.apng(){
+				Ok(frames)=>encode_anim(headers,size,frames.into_frames()),
+				Err(_)=>encode_single(headers,response_bytes)
+			}
+		},
+		image::ImageFormat::Gif => {
+			match image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&response_bytes)){
+				Ok(a)=>encode_anim(headers,a.dimensions(),a.into_frames()),
+				Err(_)=>encode_single(headers,response_bytes)
+			}
+		},
+		image::ImageFormat::WebP => {
+			let a=match image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(&response_bytes)){
+				Ok(a)=>a,
+				Err(_)=>return encode_single(headers,response_bytes)
+			};
+			if a.has_animation(){
+				encode_anim(headers,a.dimensions(),a.into_frames())
+			}else{
+				encode_single(headers,response_bytes)
+			}
+		},
+		_ => {
+			encode_single(headers,response_bytes)
+		},
+	}
+}
+fn encode_anim(mut headers: axum::http::HeaderMap,size:(u32,u32),frames:image::Frames)->axum::response::Response{
+	let conf=webp::WebPConfig::new().unwrap();
+	let mut encoder=webp::AnimEncoder::new(size.0,size.1,&conf);
+	let mut image_buffer=vec![];
+	{
+		let mut timestamp=0;
+		for frame in frames{
+			if let Ok(frame)=frame{
+				timestamp+=std::time::Duration::from(frame.delay()).as_millis() as i32;
+				let img=image::DynamicImage::ImageRgba8(frame.into_buffer());
+				let img=resize(img);
+				image_buffer.push((img,timestamp));
+			}
+		}
+	}
+	for (img,timestamp) in &image_buffer{
+		let aframe=webp::AnimFrame::from_image(img,*timestamp);
+		if let Ok(aframe)=aframe{
+			encoder.add_frame(aframe);
+		}
+	}
+	if image_buffer.is_empty(){
+		headers.append("X-Proxy-Error","NoAvailableFrames".parse().unwrap());
+		return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
+	};
+	let buf=encoder.encode();
+	headers.remove("Content-Type");
+	headers.append("Content-Type","image/webp".parse().unwrap());
+	(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
+}
+fn encode_single(mut headers: axum::http::HeaderMap,response_bytes:axum::body::Bytes)->axum::response::Response{
+	let img=image::load_from_memory(&response_bytes);
+	let img=match img{
+		Ok(img)=>img,
+		Err(e)=>{
+			headers.append("X-Proxy-Error",format!("DecodeError_{:?}",e).parse().unwrap());
+			return (axum::http::StatusCode::OK,headers,response_bytes).into_response();
+		}
+	};
+	let img=resize(img);
+	let mut buf=vec![];
+	match img.write_to(&mut std::io::Cursor::new(&mut buf),image::ImageFormat::WebP){
+		Ok(_)=>{
+			headers.remove("Content-Type");
+			headers.append("Content-Type","image/webp".parse().unwrap());
+			(axum::http::StatusCode::OK,headers,buf).into_response()
+		},
+		Err(e)=>{
+			headers.append("X-Proxy-Error",format!("EncodeError_{:?}",e).parse().unwrap());
+			(axum::http::StatusCode::OK,headers,response_bytes).into_response()
+		}
+	}
 }
 #[derive(Debug,Serialize,Deserialize)]
 pub struct ConfigFile{
