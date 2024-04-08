@@ -1,16 +1,36 @@
 
 use axum::response::IntoResponse;
-use image::{AnimationDecoder, DynamicImage, GenericImage, ImageDecoder};
-use tokio_stream::StreamExt;
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageDecoder};
 
 use crate::RequestContext;
 
 impl RequestContext{
-	fn resize(&self,img:DynamicImage)->DynamicImage{
+	pub(crate) fn image_size_hint(&self)->(u32,u32){
 		if self.parms.badge.is_some(){
-			let width=96;
-			let height=96;
-			let img=img.resize(width,height,self.config.filter_type.into());
+			return (96,96);
+		}
+		if self.parms.r#static.is_some(){
+			return (498,422);
+		}
+		if self.parms.emoji.is_some(){
+			return (u32::MAX,128);
+		}
+		if self.parms.preview.is_some(){
+			return (200,200);
+		}
+		if self.parms.avatar.is_some(){
+			return (u32::MAX,320);
+		}
+		(self.config.max_pixels,self.config.max_pixels)
+	}
+	pub(crate) fn resize(&self,img:DynamicImage)->DynamicImage{
+		let (width,height)=self.image_size_hint();
+		if self.parms.badge.is_some(){
+			let img=if img.dimensions()==(width,height){
+				img
+			}else{
+				img.resize(width,height,self.config.filter_type.into())
+			};
 			let img=img.into_luma8();
 			let mut canvas=image::GrayAlphaImage::new(width,height);
 			let x_start=(width-img.width())/2;
@@ -28,49 +48,16 @@ impl RequestContext{
 			}
 			return DynamicImage::ImageLumaA8(canvas);
 		}
-		let mut max_width=self.config.max_pixels;
-		let mut max_height=self.config.max_pixels;
-		if self.parms.r#static.is_some(){
-			max_width=498;
-			max_height=422;
-		}
-		if self.parms.emoji.is_some(){
-			max_height=128;
-		}
-		if self.parms.preview.is_some(){
-			max_width=200;
-			max_height=200;
-		}
-		if self.parms.avatar.is_some(){
-			max_height=320;
-		}
-		let max_width=max_width.min(img.width());
-		let max_height=max_height.min(img.height());
+		let max_width=width.min(img.width());
+		let max_height=height.min(img.height());
 		let filter=self.config.filter_type.into();
+		if img.dimensions()==(max_width,max_height){
+			return img;
+		}
 		let img=img.resize(max_width,max_height,filter);
 		img
 	}
-	pub(crate) async fn encode_img(&mut self,resp: reqwest::Response)->axum::response::Response{
-		let len_hint=resp.content_length().unwrap_or(2048.min(self.config.max_size));
-		if len_hint>self.config.max_size{
-			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
-		}
-		let mut response_bytes=Vec::with_capacity(len_hint as usize);
-		let mut stream=resp.bytes_stream();
-		while let Some(x) = stream.next().await{
-			match x{
-				Ok(b)=>{
-					if response_bytes.len()+b.len()>self.config.max_size as usize{
-						return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
-					}
-					response_bytes.extend_from_slice(&b);
-				},
-				Err(e)=>{
-					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone(),format!("{:?}",e)).into_response()
-				}
-			}
-		}
-		self.src_bytes=response_bytes;
+	pub(crate) fn encode_img(&mut self)->axum::response::Response{
 		if self.parms.r#static.is_some(){
 			return self.encode_single();
 		}
@@ -155,16 +142,18 @@ impl RequestContext{
 		headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
 		(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
 	}
-	fn encode_single(&self)->axum::response::Response{
-		let mut headers=self.headers.clone();
+	fn encode_single(&mut self)->axum::response::Response{
 		let img=image::load_from_memory(&self.src_bytes);
 		let img=match img{
 			Ok(img)=>img,
 			Err(e)=>{
-				headers.append("X-Proxy-Error",format!("DecodeError_{:?}",e).parse().unwrap());
-				return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
+				self.headers.append("X-Proxy-Error",format!("DecodeError_{:?}",e).parse().unwrap());
+				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			}
 		};
+		self.response_img(img)
+	}
+	pub(crate) fn response_img(&mut self,img:DynamicImage)->axum::response::Response{
 		let img=self.resize(img);
 		let mut buf=vec![];
 		let format=if self.parms.badge.is_some(){
@@ -174,15 +163,15 @@ impl RequestContext{
 		};
 		match img.write_to(&mut std::io::Cursor::new(&mut buf),format){
 			Ok(_)=>{
-				headers.remove("Content-Type");
-				headers.append("Content-Type","image/webp".parse().unwrap());
-				headers.remove("Cache-Control");
-				headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
-				(axum::http::StatusCode::OK,headers,buf).into_response()
+				self.headers.remove("Content-Type");
+				self.headers.append("Content-Type","image/webp".parse().unwrap());
+				self.headers.remove("Cache-Control");
+				self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+				(axum::http::StatusCode::OK,self.headers.clone(),buf).into_response()
 			},
 			Err(e)=>{
-				headers.append("X-Proxy-Error",format!("EncodeError_{:?}",e).parse().unwrap());
-				(axum::http::StatusCode::BAD_GATEWAY,headers).into_response()
+				self.headers.append("X-Proxy-Error",format!("EncodeError_{:?}",e).parse().unwrap());
+				(axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
 			}
 		}
 	}

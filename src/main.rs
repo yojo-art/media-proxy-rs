@@ -2,8 +2,10 @@ use std::{io::{Read, Write}, net::SocketAddr, str::FromStr, sync::Arc};
 
 use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 mod img;
+mod svg;
 mod browsersafe;
 
 #[derive(Debug,Serialize,Deserialize)]
@@ -16,6 +18,7 @@ pub struct ConfigFile{
 	filter_type:FilterType,
 	max_pixels:u32,
 	append_headers:Vec<String>,
+	load_system_fonts:bool,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
@@ -71,6 +74,7 @@ fn main() {
 				"Content-Security-Policy:default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'".to_owned(),
 				"Access-Control-Allow-Origin:*".to_owned(),
 			].to_vec(),
+			load_system_fonts:true,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -88,7 +92,13 @@ fn main() {
 		None=>client,
 	};
 	let client=client.build().unwrap();
-	let arg_tup=(client,config,dummy_png);
+	let mut fontdb=resvg::usvg::fontdb::Database::new();
+	if config.load_system_fonts{
+		fontdb.load_system_fonts();
+	}
+	fontdb.load_fonts_dir("asset/font/");
+	let fontdb=Arc::new(fontdb);
+	let arg_tup=(client,config,dummy_png,fontdb);
 	rt.block_on(async{
 		let http_addr:SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
 		let app = Router::new();
@@ -102,7 +112,7 @@ fn main() {
 async fn get_file(
 	axum::extract::Path(_path):axum::extract::Path<String>,
 	client_headers:axum::http::HeaderMap,
-	(client,config,dummy_img):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>),
+	(client,config,dummy_img,fontdb):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>,Arc<resvg::usvg::fontdb::Database>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 	let mut headers=axum::headers::HeaderMap::new();
@@ -163,6 +173,7 @@ async fn get_file(
 		src_bytes:Vec::new(),
 		config,
 		dummy_img,
+		fontdb,
 	}.encode(resp,is_img).await
 }
 struct RequestContext{
@@ -171,11 +182,44 @@ struct RequestContext{
 	src_bytes:Vec<u8>,
 	config:Arc<ConfigFile>,
 	dummy_img:Arc<Vec<u8>>,
+	fontdb:Arc<resvg::usvg::fontdb::Database>,
 }
 impl RequestContext{
 	async fn encode(&mut self,resp: reqwest::Response,is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
-		if is_img{
-			let resp=self.encode_img(resp).await;
+		let mut is_svg=false;
+		if let Some(media)=self.headers.get("Content-Type"){
+			let s=String::from_utf8_lossy(media.as_bytes());
+			if s.as_ref()=="image/svg+xml"{
+				is_svg=true;
+			}
+		}
+		if !is_svg&&!is_img{
+			if let Some(cd)=self.headers.get("Content-Disposition"){
+				let s=String::from_utf8_lossy(cd.as_bytes());
+				if s.contains(".svg"){
+					is_svg=true;
+				}
+			}
+		}
+		if is_svg{
+			self.load_all(resp).await?;
+			if let Ok(img)=self.encode_svg(&self.fontdb){
+				self.headers.remove("Content-Length");
+				self.headers.remove("Content-Range");
+				self.headers.remove("Accept-Ranges");
+				self.headers.remove("Cache-Control");
+				self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+				if let Some(cd)=self.headers.remove("Content-Disposition"){
+					let s=String::from_utf8_lossy(cd.as_bytes());
+					self.headers.append("Content-Disposition",format!("{}.webp",s).parse().unwrap());
+				}
+				return Err(self.response_img(img));
+			}else{
+				return Err((axum::http::StatusCode::OK,self.headers.clone(),self.src_bytes.clone()).into_response());
+			}
+		}else if is_img{
+			self.load_all(resp).await?;
+			let resp=self.encode_img();
 			if self.parms.fallback.is_some(){
 				return Err(if resp.status()==axum::http::StatusCode::OK{
 					resp
@@ -196,7 +240,7 @@ impl RequestContext{
 				self.headers.append("Content-Type","octet-stream".parse().unwrap());
 				if let Some(cd)=self.headers.remove("Content-Disposition"){
 					let s=String::from_utf8_lossy(cd.as_bytes());
-					self.headers.append("Content-Type",format!("{}.unknown",s).parse().unwrap());
+					self.headers.append("Content-Disposition",format!("{}.unknown",s).parse().unwrap());
 				}
 			}
 		}
@@ -219,5 +263,28 @@ impl RequestContext{
 				axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
 			})
 		}
+	}
+	async fn load_all(&mut self,resp: reqwest::Response)->Result<(),axum::response::Response>{
+		let len_hint=resp.content_length().unwrap_or(2048.min(self.config.max_size));
+		if len_hint>self.config.max_size{
+			return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
+		}
+		let mut response_bytes=Vec::with_capacity(len_hint as usize);
+		let mut stream=resp.bytes_stream();
+		while let Some(x) = stream.next().await{
+			match x{
+				Ok(b)=>{
+					if response_bytes.len()+b.len()>self.config.max_size as usize{
+						return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
+					}
+					response_bytes.extend_from_slice(&b);
+				},
+				Err(e)=>{
+					return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone(),format!("{:?}",e)).into_response())
+				}
+			}
+		}
+		self.src_bytes=response_bytes;
+		Ok(())
 	}
 }
