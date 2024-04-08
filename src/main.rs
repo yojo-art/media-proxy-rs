@@ -2,7 +2,7 @@ use std::{io::Write, net::SocketAddr, str::FromStr, sync::Arc};
 
 use axum::{http::HeaderMap, response::IntoResponse, Router};
 use futures::StreamExt;
-use image::{AnimationDecoder, DynamicImage, ImageDecoder};
+use image::{AnimationDecoder, DynamicImage, GenericImage, ImageDecoder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug,Serialize,Deserialize)]
@@ -24,6 +24,7 @@ pub struct RequestParams{
 	emoji:Option<String>,
 	avatar:Option<String>,
 	preview:Option<String>,
+	badge:Option<String>,
 }
 #[derive(Clone, Copy,Debug,Serialize,Deserialize)]
 enum FilterType{
@@ -163,6 +164,27 @@ struct RequestContext{
 }
 impl RequestContext{
 	fn resize(&self,img:DynamicImage)->DynamicImage{
+		if self.parms.badge.is_some(){
+			let width=96;
+			let height=96;
+			let img=img.resize(width,height,self.config.filter_type.into());
+			let img=img.into_luma8();
+			let mut canvas=image::GrayAlphaImage::new(width,height);
+			let x_start=(width-img.width())/2;
+			let y_start=(height-img.height())/2;
+			let mut sub_canvas=canvas.sub_image(x_start,y_start,width-x_start,height-y_start);
+			let mut y=0;
+			for rows in img.rows(){
+				let mut x=0;
+				for p in rows{
+					let p:image::LumaA<u8>=[p.0[0],p.0[0]].into();
+					sub_canvas.put_pixel(x,y,p);
+					x+=1;
+				}
+				y+=1;
+			}
+			return DynamicImage::ImageLumaA8(canvas);
+		}
 		let mut max_width=self.config.max_pixels;
 		let mut max_height=self.config.max_pixels;
 		if self.parms.r#static.is_some(){
