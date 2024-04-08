@@ -101,7 +101,7 @@ fn main() {
 
 async fn get_file(
 	axum::extract::Path(_path):axum::extract::Path<String>,
-	headers:axum::http::HeaderMap,
+	client_headers:axum::http::HeaderMap,
 	(client,config,dummy_img):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
@@ -110,6 +110,11 @@ async fn get_file(
 	let req=client.get(&q.url);
 	let req=req.timeout(std::time::Duration::from_millis(config.timeout));
 	let req=req.header("UserAgent",config.user_agent.clone());
+	let req=if let Some(range)=client_headers.get("Range"){
+		req.header("Range",range.as_bytes())
+	}else{
+		req
+	};
 	let resp=match req.send().await{
 		Ok(resp) => resp,
 		Err(e) => {
@@ -128,6 +133,17 @@ async fn get_file(
 	let remote_headers=resp.headers();
 	add_remote_header("Content-Disposition",&mut headers,remote_headers);
 	add_remote_header("Content-Type",&mut headers,remote_headers);
+	let is_img=if let Some(media)=headers.get("Content-Type"){
+		let s=String::from_utf8_lossy(media.as_bytes());
+		s.starts_with("image/")
+	}else{
+		false
+	};
+	if !is_img{
+		add_remote_header("Content-Length",&mut headers,remote_headers);
+		add_remote_header("Content-Range",&mut headers,remote_headers);
+		add_remote_header("Accept-Ranges",&mut headers,remote_headers);
+	}
 	headers.append("Cache-Control","max-age=300".parse().unwrap());
 	for line in config.append_headers.iter(){
 		if let Some(idx)=line.find(":"){
@@ -147,7 +163,7 @@ async fn get_file(
 		src_bytes:Vec::new(),
 		config,
 		dummy_img,
-	}.encode(resp).await
+	}.encode(resp,is_img).await
 }
 struct RequestContext{
 	headers:HeaderMap,
@@ -157,22 +173,22 @@ struct RequestContext{
 	dummy_img:Arc<Vec<u8>>,
 }
 impl RequestContext{
-	async fn encode(&mut self,resp: reqwest::Response)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+	async fn encode(&mut self,resp: reqwest::Response,is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+		if is_img{
+			let resp=self.encode_img(resp).await;
+			if self.parms.fallback.is_some(){
+				return Err(if resp.status()==axum::http::StatusCode::OK{
+					resp
+				}else{
+					self.headers.remove("Content-Type");
+					self.headers.append("Content-Type","image/png".parse().unwrap());
+					(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
+				});
+			}
+			return Err(resp);
+		}
 		if let Some(media)=self.headers.get("Content-Type"){
 			let s=String::from_utf8_lossy(media.as_bytes());
-			if s.starts_with("image/"){
-				let resp=self.encode_img(resp).await;
-				if self.parms.fallback.is_some(){
-					return Err(if resp.status()==axum::http::StatusCode::OK{
-						resp
-					}else{
-						self.headers.remove("Content-Type");
-						self.headers.append("Content-Type","image/png".parse().unwrap());
-						(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
-					});
-				}
-				return Err(resp);
-			}
 			if crate::browsersafe::FILE_TYPE_BROWSERSAFE.contains(&s.as_ref()){
 
 			}else{
@@ -187,7 +203,13 @@ impl RequestContext{
 		let status=resp.status();
 		let body=StreamBody::new(resp.bytes_stream());
 		if status.is_success(){
-			Ok((axum::http::StatusCode::OK,self.headers.clone(),body))
+			self.headers.remove("Cache-Control");
+			self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+			if status==reqwest::StatusCode::PARTIAL_CONTENT{
+				Ok((axum::http::StatusCode::PARTIAL_CONTENT,self.headers.clone(),body))
+			}else{
+				Ok((axum::http::StatusCode::OK,self.headers.clone(),body))
+			}
 		}else{
 			Err(if self.parms.fallback.is_some(){
 				self.headers.remove("Content-Type");
