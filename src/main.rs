@@ -118,6 +118,7 @@ async fn get_file(
 	let remote_headers=resp.headers();
 	add_remote_header("Content-Disposition",&mut headers,remote_headers);
 	add_remote_header("Content-Type",&mut headers,remote_headers);
+	headers.append("Cache-Control","max-age=300".parse().unwrap());
 	for line in config.append_headers.iter(){
 		if let Some(idx)=line.find(":"){
 			if idx+1>=line.len(){
@@ -285,6 +286,8 @@ impl RequestContext{
 		let buf=encoder.encode();
 		headers.remove("Content-Type");
 		headers.append("Content-Type","image/webp".parse().unwrap());
+		headers.remove("Cache-Control");
+		headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
 		(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
 	}
 	fn encode_single(&self)->axum::response::Response{
@@ -303,6 +306,8 @@ impl RequestContext{
 			Ok(_)=>{
 				headers.remove("Content-Type");
 				headers.append("Content-Type","image/webp".parse().unwrap());
+				headers.remove("Cache-Control");
+				headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
 				(axum::http::StatusCode::OK,headers,buf).into_response()
 			},
 			Err(e)=>{
