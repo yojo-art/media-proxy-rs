@@ -1,6 +1,7 @@
 
 use axum::response::IntoResponse;
 use image::{AnimationDecoder, DynamicImage, GenericImage, ImageDecoder};
+use tokio_stream::StreamExt;
 
 use crate::RequestContext;
 
@@ -49,7 +50,27 @@ impl RequestContext{
 		let img=img.resize(max_width,max_height,filter);
 		img
 	}
-	pub(crate) fn encode_img(&mut self)->axum::response::Response{
+	pub(crate) async fn encode_img(&mut self,resp: reqwest::Response)->axum::response::Response{
+		let len_hint=resp.content_length().unwrap_or(2048.min(self.config.max_size));
+		if len_hint>self.config.max_size{
+			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
+		}
+		let mut response_bytes=Vec::with_capacity(len_hint as usize);
+		let mut stream=resp.bytes_stream();
+		while let Some(x) = stream.next().await{
+			match x{
+				Ok(b)=>{
+					if response_bytes.len()+b.len()>self.config.max_size as usize{
+						return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
+					}
+					response_bytes.extend_from_slice(&b);
+				},
+				Err(e)=>{
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone(),format!("{:?}",e)).into_response()
+				}
+			}
+		}
+		self.src_bytes=response_bytes;
 		if self.parms.r#static.is_some(){
 			return self.encode_single();
 		}

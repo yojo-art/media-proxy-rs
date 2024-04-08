@@ -1,10 +1,11 @@
 use std::{io::Write, net::SocketAddr, str::FromStr, sync::Arc};
 
-use axum::{http::HeaderMap, response::IntoResponse, Router};
+use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 mod img;
+mod browsersafe;
 
 #[derive(Debug,Serialize,Deserialize)]
 pub struct ConfigFile{
@@ -101,7 +102,7 @@ async fn get_file(
 	client:reqwest::Client,
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 	config:Arc<ConfigFile>,
-)->axum::response::Response{
+)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 	let mut headers=axum::headers::HeaderMap::new();
 	headers.append("X-Remote-Url",q.url.parse().unwrap());
 	let req=client.get(&q.url);
@@ -109,7 +110,7 @@ async fn get_file(
 	let req=req.header("UserAgent",config.user_agent.clone());
 	let resp=match req.send().await{
 		Ok(resp) => resp,
-		Err(e) => return (axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response(),
+		Err(e) => return Err((axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response()),
 	};
 	fn add_remote_header(key:&'static str,headers:&mut axum::headers::HeaderMap,remote_headers:&reqwest::header::HeaderMap){
 		for v in remote_headers.get_all(key){
@@ -132,40 +133,43 @@ async fn get_file(
 			}
 		}
 	}
-	let len_hint=resp.content_length().unwrap_or(2048.min(config.max_size));
-	if len_hint>config.max_size{
-		return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response()
-	}
-	let mut response_bytes=Vec::with_capacity(len_hint as usize);
-	let mut stream=resp.bytes_stream();
-	while let Some(x) = stream.next().await{
-		match x{
-			Ok(b)=>{
-				if response_bytes.len()+b.len()>config.max_size as usize{
-					return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response()
-				}
-				response_bytes.extend_from_slice(&b);
-			},
-			Err(e)=>{
-				return (axum::http::StatusCode::BAD_GATEWAY,headers,format!("{:?}",e)).into_response()
-			}
-		}
-	}
 	RequestContext{
 		headers,
-		src_bytes:response_bytes,
 		parms:q,
+		src_bytes:Vec::new(),
 		config,
-	}.encode()
+	}.encode(resp).await
 }
 struct RequestContext{
 	headers:HeaderMap,
-	src_bytes:Vec<u8>,
 	parms:RequestParams,
+	src_bytes:Vec<u8>,
 	config:Arc<ConfigFile>,
 }
 impl RequestContext{
-	fn encode(&mut self)->axum::response::Response{
-		self.encode_img()
+	async fn encode(&mut self,resp: reqwest::Response)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+		if let Some(media)=self.headers.get("Content-Type"){
+			let s=String::from_utf8_lossy(media.as_bytes());
+			if s.starts_with("image/"){
+				return Err(self.encode_img(resp).await);
+			}
+			if crate::browsersafe::FILE_TYPE_BROWSERSAFE.contains(&s.as_ref()){
+
+			}else{
+				self.headers.remove("Content-Type");
+				self.headers.append("Content-Type","octet-stream".parse().unwrap());
+				if let Some(cd)=self.headers.remove("Content-Disposition"){
+					let s=String::from_utf8_lossy(cd.as_bytes());
+					self.headers.append("Content-Type",format!("{}.unknown",s).parse().unwrap());
+				}
+			}
+		}
+		let status=resp.status();
+		let body=StreamBody::new(resp.bytes_stream());
+		if status.is_success(){
+			Ok((axum::http::StatusCode::OK,self.headers.clone(),body))
+		}else{
+			Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
+		}
 	}
 }
