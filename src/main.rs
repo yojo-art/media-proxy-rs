@@ -1,7 +1,6 @@
-use std::{io::Write, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{io::{Read, Write}, net::SocketAddr, str::FromStr, sync::Arc};
 
 use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 mod img;
@@ -27,6 +26,7 @@ pub struct RequestParams{
 	avatar:Option<String>,
 	preview:Option<String>,
 	badge:Option<String>,
+	fallback:Option<String>,
 }
 #[derive(Clone, Copy,Debug,Serialize,Deserialize)]
 enum FilterType{
@@ -77,6 +77,9 @@ fn main() {
 	}
 	let config:ConfigFile=serde_json::from_reader(std::fs::File::open(&config_path).unwrap()).unwrap();
 
+	let mut dummy_png=vec![];
+	std::fs::File::open("asset/dummy.png").expect("not found dummy.png").read_to_end(&mut dummy_png).expect("load error dummy.png");
+	let dummy_png=Arc::new(dummy_png);
 	let config=Arc::new(config);
 	let rt=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 	let client=reqwest::ClientBuilder::new();
@@ -85,13 +88,13 @@ fn main() {
 		None=>client,
 	};
 	let client=client.build().unwrap();
+	let arg_tup=(client,config,dummy_png);
 	rt.block_on(async{
-		let http_addr:SocketAddr = config.bind_addr.parse().unwrap();
+		let http_addr:SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
 		let app = Router::new();
-		let client0=client.clone();
-		let config0=config.clone();
-		let app=app.route("/",axum::routing::get(move|path,headers,parms|get_file(path,headers,client0.clone(),parms,config0.clone())));
-		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(path,headers,client.clone(),parms,config.clone())));
+		let arg_tup0=arg_tup.clone();
+		let app=app.route("/",axum::routing::get(move|path,headers,parms|get_file(path,headers,arg_tup0.clone(),parms)));
+		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(path,headers,arg_tup.clone(),parms)));
 		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 	});
 }
@@ -99,9 +102,8 @@ fn main() {
 async fn get_file(
 	axum::extract::Path(_path):axum::extract::Path<String>,
 	headers:axum::http::HeaderMap,
-	client:reqwest::Client,
+	(client,config,dummy_img):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
-	config:Arc<ConfigFile>,
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 	let mut headers=axum::headers::HeaderMap::new();
 	headers.append("X-Remote-Url",q.url.parse().unwrap());
@@ -110,7 +112,13 @@ async fn get_file(
 	let req=req.header("UserAgent",config.user_agent.clone());
 	let resp=match req.send().await{
 		Ok(resp) => resp,
-		Err(e) => return Err((axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response()),
+		Err(e) => {
+			if q.fallback.is_some(){
+				headers.append("Content-Type","image/png".parse().unwrap());
+				return Err((axum::http::StatusCode::OK,headers,(*dummy_img).clone()).into_response());
+			}
+			return Err((axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response())
+		}
 	};
 	fn add_remote_header(key:&'static str,headers:&mut axum::headers::HeaderMap,remote_headers:&reqwest::header::HeaderMap){
 		for v in remote_headers.get_all(key){
@@ -138,6 +146,7 @@ async fn get_file(
 		parms:q,
 		src_bytes:Vec::new(),
 		config,
+		dummy_img,
 	}.encode(resp).await
 }
 struct RequestContext{
@@ -145,13 +154,24 @@ struct RequestContext{
 	parms:RequestParams,
 	src_bytes:Vec<u8>,
 	config:Arc<ConfigFile>,
+	dummy_img:Arc<Vec<u8>>,
 }
 impl RequestContext{
 	async fn encode(&mut self,resp: reqwest::Response)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 		if let Some(media)=self.headers.get("Content-Type"){
 			let s=String::from_utf8_lossy(media.as_bytes());
 			if s.starts_with("image/"){
-				return Err(self.encode_img(resp).await);
+				let resp=self.encode_img(resp).await;
+				if self.parms.fallback.is_some(){
+					return Err(if resp.status()==axum::http::StatusCode::OK{
+						resp
+					}else{
+						self.headers.remove("Content-Type");
+						self.headers.append("Content-Type","image/png".parse().unwrap());
+						(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
+					});
+				}
+				return Err(resp);
 			}
 			if crate::browsersafe::FILE_TYPE_BROWSERSAFE.contains(&s.as_ref()){
 
@@ -169,7 +189,13 @@ impl RequestContext{
 		if status.is_success(){
 			Ok((axum::http::StatusCode::OK,self.headers.clone(),body))
 		}else{
-			Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
+			Err(if self.parms.fallback.is_some(){
+				self.headers.remove("Content-Type");
+				self.headers.append("Content-Type","image/png".parse().unwrap());
+				(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
+			}else{
+				axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+			})
 		}
 	}
 }

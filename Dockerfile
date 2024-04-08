@@ -24,6 +24,7 @@ ARG GID="852"
 RUN addgroup -g "${GID}" proxy && adduser -u "${UID}" -G proxy -D -h /media-proxy-rs -s /bin/sh proxy
 WORKDIR /media-proxy-rs
 USER proxy
+COPY asset ./asset
 COPY --from=0 /app/target/x86_64-unknown-linux-musl/release/media-proxy-rs ./media-proxy-rs
 EXPOSE 12766
 CMD ["./media-proxy-rs"]
