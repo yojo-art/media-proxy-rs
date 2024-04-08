@@ -2,6 +2,7 @@ use std::{io::{Read, Write}, net::SocketAddr, str::FromStr, sync::Arc};
 
 use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 mod img;
 mod browsersafe;
@@ -175,7 +176,8 @@ struct RequestContext{
 impl RequestContext{
 	async fn encode(&mut self,resp: reqwest::Response,is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 		if is_img{
-			let resp=self.encode_img(resp).await;
+			self.load_all(resp).await?;
+			let resp=self.encode_img();
 			if self.parms.fallback.is_some(){
 				return Err(if resp.status()==axum::http::StatusCode::OK{
 					resp
@@ -219,5 +221,28 @@ impl RequestContext{
 				axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
 			})
 		}
+	}
+	async fn load_all(&mut self,resp: reqwest::Response)->Result<(),axum::response::Response>{
+		let len_hint=resp.content_length().unwrap_or(2048.min(self.config.max_size));
+		if len_hint>self.config.max_size{
+			return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
+		}
+		let mut response_bytes=Vec::with_capacity(len_hint as usize);
+		let mut stream=resp.bytes_stream();
+		while let Some(x) = stream.next().await{
+			match x{
+				Ok(b)=>{
+					if response_bytes.len()+b.len()>self.config.max_size as usize{
+						return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
+					}
+					response_bytes.extend_from_slice(&b);
+				},
+				Err(e)=>{
+					return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone(),format!("{:?}",e)).into_response())
+				}
+			}
+		}
+		self.src_bytes=response_bytes;
+		Ok(())
 	}
 }
