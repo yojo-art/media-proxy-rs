@@ -1,4 +1,4 @@
-use std::{io::Write, net::SocketAddr, sync::Arc};
+use std::{io::Write, net::SocketAddr, str::FromStr, sync::Arc};
 
 use axum::{http::HeaderMap, response::IntoResponse, Router};
 use futures::StreamExt;
@@ -14,6 +14,7 @@ pub struct ConfigFile{
 	proxy:Option<String>,
 	filter_type:FilterType,
 	max_pixels:u32,
+	append_headers:Vec<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
@@ -63,6 +64,10 @@ fn main() {
 			proxy:None,
 			filter_type:FilterType::Triangle,
 			max_pixels:2048,
+			append_headers:[
+				"Content-Security-Policy:default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'".to_owned(),
+				"Access-Control-Allow-Origin:*".to_owned(),
+			].to_vec(),
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -112,7 +117,18 @@ async fn get_file(
 	let remote_headers=resp.headers();
 	add_remote_header("Content-Disposition",&mut headers,remote_headers);
 	add_remote_header("Content-Type",&mut headers,remote_headers);
-	headers.append("Content-Security-Policy","default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'".parse().unwrap());
+	for line in config.append_headers.iter(){
+		if let Some(idx)=line.find(":"){
+			if idx+1>=line.len(){
+				continue;
+			}
+			if let Ok(k)=axum::headers::HeaderName::from_str(&line[0..idx]){
+				if let Ok(v)=line[idx+1..].parse(){
+					headers.append(k,v);
+				}
+			}
+		}
+	}
 	let len_hint=resp.content_length().unwrap_or(2048.min(config.max_size));
 	if len_hint>config.max_size{
 		return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response()
