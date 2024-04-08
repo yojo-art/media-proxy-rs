@@ -20,6 +20,9 @@ pub struct RequestParams{
 	url: String,
 	//#[serde(rename = "static")]
 	r#static:Option<String>,
+	emoji:Option<String>,
+	avatar:Option<String>,
+	preview:Option<String>,
 }
 #[derive(Clone, Copy,Debug,Serialize,Deserialize)]
 enum FilterType{
@@ -144,8 +147,26 @@ struct RequestContext{
 }
 impl RequestContext{
 	fn resize(&self,img:DynamicImage)->DynamicImage{
-		let max_pixels=self.config.max_pixels;
-		let img=img.resize(max_pixels.min(img.width()),img.height().min(max_pixels),self.config.filter_type.into());
+		let mut max_width=self.config.max_pixels;
+		let mut max_height=self.config.max_pixels;
+		if self.parms.r#static.is_some(){
+			max_width=498;
+			max_height=422;
+		}
+		if self.parms.emoji.is_some(){
+			max_height=128;
+		}
+		if self.parms.preview.is_some(){
+			max_width=200;
+			max_height=200;
+		}
+		if self.parms.avatar.is_some(){
+			max_height=320;
+		}
+		let max_width=max_width.min(img.width());
+		let max_height=max_height.min(img.height());
+		let filter=self.config.filter_type.into();
+		let img=img.resize(max_width,max_height,filter);
 		img
 	}
 	fn encode(mut self)->axum::response::Response{
