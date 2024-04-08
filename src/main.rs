@@ -212,6 +212,9 @@ impl RequestContext{
 		if self.parms.r#static.is_some(){
 			return self.encode_single();
 		}
+		if self.parms.badge.is_some(){
+			return self.encode_single();
+		}
 		let codec=image::guess_format(&self.src_bytes);
 		let codec=match codec{
 			Ok(codec) => codec,
@@ -302,7 +305,12 @@ impl RequestContext{
 		};
 		let img=self.resize(img);
 		let mut buf=vec![];
-		match img.write_to(&mut std::io::Cursor::new(&mut buf),image::ImageFormat::WebP){
+		let format=if self.parms.badge.is_some(){
+			image::ImageFormat::Png
+		}else{
+			image::ImageFormat::WebP
+		};
+		match img.write_to(&mut std::io::Cursor::new(&mut buf),format){
 			Ok(_)=>{
 				headers.remove("Content-Type");
 				headers.append("Content-Type","image/webp".parse().unwrap());
