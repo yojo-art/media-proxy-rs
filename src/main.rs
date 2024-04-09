@@ -51,7 +51,7 @@ impl Into<image::imageops::FilterType> for FilterType{
 	}
 }
 fn main() {
-	let config_path=match std::env::var("FILES_PROXY_CONFIG_PATH"){
+	let config_path=match std::env::var("MEDIA_PROXY_CONFIG_PATH"){
 		Ok(path)=>{
 			if path.is_empty(){
 				"config.json".to_owned()
@@ -331,6 +331,7 @@ impl RequestContext{
 	async fn load_all(&mut self,resp: reqwest::Response)->Result<(),axum::response::Response>{
 		let len_hint=resp.content_length().unwrap_or(2048.min(self.config.max_size));
 		if len_hint>self.config.max_size{
+			self.headers.append("X-Proxy-Error",format!("lengthHint:{}>{}",len_hint,self.config.max_size).parse().unwrap());
 			return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
 		}
 		let mut response_bytes=Vec::with_capacity(len_hint as usize);
@@ -339,11 +340,13 @@ impl RequestContext{
 			match x{
 				Ok(b)=>{
 					if response_bytes.len()+b.len()>self.config.max_size as usize{
+						self.headers.append("X-Proxy-Error",format!("length:{}>{}",response_bytes.len()+b.len(),self.config.max_size).parse().unwrap());
 						return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
 					}
 					response_bytes.extend_from_slice(&b);
 				},
 				Err(e)=>{
+					self.headers.append("X-Proxy-Error",format!("LoadAll:{:?}",e).parse().unwrap());
 					return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone(),format!("{:?}",e)).into_response())
 				}
 			}

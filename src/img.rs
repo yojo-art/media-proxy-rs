@@ -68,7 +68,7 @@ impl RequestContext{
 		let codec=match codec{
 			Ok(codec) => codec,
 			Err(e) => {
-				self.headers.append("X-Codec-Error",format!("{:?}",e).parse().unwrap());
+				self.headers.append("X-Proxy-Error",format!("CodecError:{:?}",e).parse().unwrap());
 				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			},
 		};
