@@ -140,6 +140,7 @@ impl RequestContext{
 		headers.append("Content-Type","image/webp".parse().unwrap());
 		headers.remove("Cache-Control");
 		headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+		Self::disposition_ext(&mut headers,".webp");
 		(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
 	}
 	fn encode_single(&mut self)->axum::response::Response{
@@ -167,6 +168,7 @@ impl RequestContext{
 				self.headers.append("Content-Type","image/webp".parse().unwrap());
 				self.headers.remove("Cache-Control");
 				self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+				Self::disposition_ext(&mut self.headers,".webp");
 				(axum::http::StatusCode::OK,self.headers.clone(),buf).into_response()
 			},
 			Err(e)=>{
