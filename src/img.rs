@@ -1,6 +1,6 @@
 
 use axum::response::IntoResponse;
-use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageDecoder};
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
 
 use crate::RequestContext;
 
