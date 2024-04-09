@@ -185,6 +185,71 @@ struct RequestContext{
 	fontdb:Arc<resvg::usvg::fontdb::Database>,
 }
 impl RequestContext{
+	pub fn disposition_ext(headers:&mut HeaderMap,ext:&str){
+		Self::rename_disposition(headers,|s|{
+			let mut last_dot=s.len()-1;
+			let mut index=0;
+			for c in s.chars(){
+				if c=='.'{
+					last_dot=index;
+				}
+				index+=1;
+			}
+			format!("{}{}",&s[0..last_dot as usize],ext)
+		})
+	}
+	pub fn rename_disposition(headers:&mut HeaderMap,mut f:impl FnMut(&str)->String){
+		let k="Content-Disposition";
+		if let Some(cd)=headers.get(k){
+			let s=std::str::from_utf8(cd.as_bytes());
+			if let Ok(s)=s{
+				let mut res=String::new();
+				for e in s.split("; "){
+					if e.starts_with("filename"){
+						let mut index=0;
+						for e in e.split("="){
+							//明示文字コード指定があるか
+							let mut is_charset=false;
+							if index==0{
+								res.push_str(e);
+								res.push_str("=");
+								if e.ends_with("*"){
+									is_charset=true;
+								}
+							}
+							if index==1{
+								if is_charset{
+									if let Some(i)=e.find("\""){
+										res.push_str(&format!("{}\"{}",&e[0..i],f(&e[i..]).as_str()));
+									}
+								}else if e.starts_with("\"")&&e.ends_with("\""){
+									let e=&e[1..e.len()-1];
+									if !e.is_empty(){
+										res.push_str(&format!("\"{}\"",f(e).as_str()));
+									}
+								}else{
+									if !e.is_empty(){
+										res.push_str(f(e).as_str());
+									}
+								}
+							}
+							index+=1;
+						}
+						if index==1{
+							res.push_str(f("null").as_str());
+						}
+					}else{
+						res.push_str(e);
+					}
+					res.push_str("; ");
+				}
+				headers.remove(k);
+				headers.append(k,res.parse().unwrap());
+			}
+		}
+	}
+}
+impl RequestContext{
 	async fn encode(&mut self,resp: reqwest::Response,is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 		let mut is_svg=false;
 		if let Some(media)=self.headers.get("Content-Type"){
@@ -195,9 +260,15 @@ impl RequestContext{
 		}
 		if !is_svg&&!is_img{
 			if let Some(cd)=self.headers.get("Content-Disposition"){
-				let s=String::from_utf8_lossy(cd.as_bytes());
-				if s.contains(".svg"){
-					is_svg=true;
+				let s=std::str::from_utf8(cd.as_bytes());
+				if let Ok(s)=s{
+					for e in s.split(";"){
+						if e.starts_with("filename"){
+							if e.contains(".svg"){
+								is_svg=true;
+							}
+						}
+					}
 				}
 			}
 		}
@@ -209,10 +280,6 @@ impl RequestContext{
 				self.headers.remove("Accept-Ranges");
 				self.headers.remove("Cache-Control");
 				self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
-				if let Some(cd)=self.headers.remove("Content-Disposition"){
-					let s=String::from_utf8_lossy(cd.as_bytes());
-					self.headers.append("Content-Disposition",format!("{}.webp",s).parse().unwrap());
-				}
 				return Err(self.response_img(img));
 			}else{
 				return Err((axum::http::StatusCode::OK,self.headers.clone(),self.src_bytes.clone()).into_response());
@@ -238,10 +305,7 @@ impl RequestContext{
 			}else{
 				self.headers.remove("Content-Type");
 				self.headers.append("Content-Type","octet-stream".parse().unwrap());
-				if let Some(cd)=self.headers.remove("Content-Disposition"){
-					let s=String::from_utf8_lossy(cd.as_bytes());
-					self.headers.append("Content-Disposition",format!("{}.unknown",s).parse().unwrap());
-				}
+				Self::disposition_ext(&mut self.headers,".unknown");
 			}
 		}
 		let status=resp.status();
