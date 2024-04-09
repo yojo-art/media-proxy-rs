@@ -81,15 +81,14 @@ impl RequestContext{
 				if !a.is_apng().unwrap(){
 					return self.encode_single();
 				}
-				let size=a.dimensions();
 				match a.apng(){
-					Ok(frames)=>self.encode_anim(size,frames.into_frames()),
+					Ok(frames)=>self.encode_anim(frames.into_frames()),
 					Err(_)=>self.encode_single()
 				}
 			},
 			image::ImageFormat::Gif => {
 				match image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&self.src_bytes)){
-					Ok(a)=>self.encode_anim(a.dimensions(),a.into_frames()),
+					Ok(a)=>self.encode_anim(a.into_frames()),
 					Err(_)=>self.encode_single()
 				}
 			},
@@ -99,7 +98,7 @@ impl RequestContext{
 					Err(_)=>return self.encode_single()
 				};
 				if a.has_animation(){
-					self.encode_anim(a.dimensions(),a.into_frames())
+					self.encode_anim(a.into_frames())
 				}else{
 					self.encode_single()
 				}
@@ -109,10 +108,10 @@ impl RequestContext{
 			},
 		}
 	}
-	fn encode_anim(&self,size:(u32,u32),frames:image::Frames)->axum::response::Response{
+	fn encode_anim(&self,frames:image::Frames)->axum::response::Response{
 		let conf=webp::WebPConfig::new().unwrap();
-		let mut encoder=webp::AnimEncoder::new(size.0,size.1,&conf);
 		let mut image_buffer=vec![];
+		let mut size:Option<(u32, u32)>=None;
 		{
 			let mut timestamp=0;
 			for frame in frames{
@@ -120,17 +119,32 @@ impl RequestContext{
 					timestamp+=std::time::Duration::from(frame.delay()).as_millis() as i32;
 					let img=image::DynamicImage::ImageRgba8(frame.into_buffer());
 					let img=self.resize(img);
+					if let Some(size)=size{
+						if size.0==img.width()&&size.1==img.height(){
+							//ok
+						}else{
+							continue;
+						}
+					}else{
+						size=Some((img.width(),img.height()));
+					}
 					image_buffer.push((img,timestamp));
 				}
 			}
 		}
+		let mut headers=self.headers.clone();
+		if size.is_none(){
+			headers.append("X-Proxy-Error","NoAvailableFrames0".parse().unwrap());
+			return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
+		};
+		let size=size.unwrap();
+		let mut encoder=webp::AnimEncoder::new(size.0,size.1,&conf);
 		for (img,timestamp) in &image_buffer{
 			let aframe=webp::AnimFrame::from_image(img,*timestamp);
 			if let Ok(aframe)=aframe{
 				encoder.add_frame(aframe);
 			}
 		}
-		let mut headers=self.headers.clone();
 		if image_buffer.is_empty(){
 			headers.append("X-Proxy-Error","NoAvailableFrames".parse().unwrap());
 			return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
