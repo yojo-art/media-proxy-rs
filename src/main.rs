@@ -19,6 +19,7 @@ pub struct ConfigFile{
 	max_pixels:u32,
 	append_headers:Vec<String>,
 	load_system_fonts:bool,
+	webp_quality:f32,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
@@ -75,6 +76,7 @@ fn main() {
 				"Access-Control-Allow-Origin:*".to_owned(),
 			].to_vec(),
 			load_system_fonts:true,
+			webp_quality: 75f32,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();

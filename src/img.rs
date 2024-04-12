@@ -189,9 +189,26 @@ impl RequestContext{
 				Self::disposition_ext(&mut self.headers,".avif");
 				image::ImageFormat::Avif
 			}else{
-				self.headers.append("Content-Type","image/webp".parse().unwrap());
-				Self::disposition_ext(&mut self.headers,".webp");
-				image::ImageFormat::WebP
+				let width=img.width();
+				let height=img.height();
+				let rgba=img.into_rgba8();
+				let encoer=webp::Encoder::from_rgba(rgba.as_raw(),width,height);
+				let mut config=webp::WebPConfig::new().unwrap();
+				config.quality=self.config.webp_quality;
+				return match encoer.encode_advanced(&config){
+					Ok(mem) => {
+						buf.extend_from_slice(&mem);
+						self.headers.append("Content-Type","image/webp".parse().unwrap());
+						self.headers.remove("Cache-Control");
+						self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+						Self::disposition_ext(&mut self.headers,".webp");
+						(axum::http::StatusCode::OK,self.headers.clone(),buf).into_response()
+					},
+					Err(e) => {
+						self.headers.append("X-Proxy-Error",format!("EncodeError_{:?}",e).parse().unwrap());
+						(axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
+					},
+				};
 			}
 		};
 		match img.write_to(&mut std::io::Cursor::new(&mut buf),format){
