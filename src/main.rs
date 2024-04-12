@@ -20,6 +20,7 @@ pub struct ConfigFile{
 	append_headers:Vec<String>,
 	load_system_fonts:bool,
 	webp_quality:f32,
+	encode_avif:bool,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams{
@@ -77,6 +78,7 @@ fn main() {
 			].to_vec(),
 			load_system_fonts:true,
 			webp_quality: 75f32,
+			encode_avif:true,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
@@ -119,7 +121,9 @@ async fn get_file(
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 	let mut headers=axum::headers::HeaderMap::new();
 	headers.append("X-Remote-Url",q.url.parse().unwrap());
-	headers.append("Vary","Accept,Range".parse().unwrap());
+	if config.encode_avif{
+		headers.append("Vary","Accept,Range".parse().unwrap());
+	}
 	let req=client.get(&q.url);
 	let req=req.timeout(std::time::Duration::from_millis(config.timeout));
 	let req=req.header("UserAgent",config.user_agent.clone());
@@ -158,7 +162,9 @@ async fn get_file(
 		add_remote_header("Accept-Ranges",&mut headers,remote_headers);
 	}
 	let mut is_accept_avif=false;
-	if let Some(accept)=client_headers.get("Accept"){
+	if !config.encode_avif{
+		//force no avif
+	}else if let Some(accept)=client_headers.get("Accept"){
 		if let Ok(accept)=std::str::from_utf8(accept.as_bytes()){
 			for e in accept.split(","){
 				if e=="image/avif"{
