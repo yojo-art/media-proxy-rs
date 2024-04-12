@@ -154,6 +154,16 @@ async fn get_file(
 		add_remote_header("Content-Range",&mut headers,remote_headers);
 		add_remote_header("Accept-Ranges",&mut headers,remote_headers);
 	}
+	let mut is_accept_avif=false;
+	if let Some(accept)=client_headers.get("Accept"){
+		if let Ok(accept)=std::str::from_utf8(accept.as_bytes()){
+			for e in accept.split(","){
+				if e=="image/avif"{
+					is_accept_avif=true;
+				}
+			}
+		}
+	}
 	headers.append("Cache-Control","max-age=300".parse().unwrap());
 	for line in config.append_headers.iter(){
 		if let Some(idx)=line.find(":"){
@@ -168,6 +178,7 @@ async fn get_file(
 		}
 	}
 	RequestContext{
+		is_accept_avif,
 		headers,
 		parms:q,
 		src_bytes:Vec::new(),
@@ -178,6 +189,7 @@ async fn get_file(
 	}.encode(resp,is_img).await
 }
 struct RequestContext{
+	is_accept_avif:bool,
 	headers:HeaderMap,
 	parms:RequestParams,
 	src_bytes:Vec<u8>,

@@ -178,18 +178,26 @@ impl RequestContext{
 		};
 		let img=self.resize(img);
 		let mut buf=vec![];
+		self.headers.remove("Content-Type");
 		let format=if self.parms.badge.is_some(){
+			self.headers.append("Content-Type","image/png".parse().unwrap());
+			Self::disposition_ext(&mut self.headers,".png");
 			image::ImageFormat::Png
 		}else{
-			image::ImageFormat::WebP
+			if self.is_accept_avif{
+				self.headers.append("Content-Type","image/avif".parse().unwrap());
+				Self::disposition_ext(&mut self.headers,".avif");
+				image::ImageFormat::Avif
+			}else{
+				self.headers.append("Content-Type","image/webp".parse().unwrap());
+				Self::disposition_ext(&mut self.headers,".webp");
+				image::ImageFormat::WebP
+			}
 		};
 		match img.write_to(&mut std::io::Cursor::new(&mut buf),format){
 			Ok(_)=>{
-				self.headers.remove("Content-Type");
-				self.headers.append("Content-Type","image/webp".parse().unwrap());
 				self.headers.remove("Cache-Control");
 				self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
-				Self::disposition_ext(&mut self.headers,".webp");
 				(axum::http::StatusCode::OK,self.headers.clone(),buf).into_response()
 			},
 			Err(e)=>{
