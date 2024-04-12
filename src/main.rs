@@ -172,6 +172,7 @@ async fn get_file(
 		parms:q,
 		src_bytes:Vec::new(),
 		config,
+		codec:None,
 		dummy_img,
 		fontdb,
 	}.encode(resp,is_img).await
@@ -181,6 +182,7 @@ struct RequestContext{
 	parms:RequestParams,
 	src_bytes:Vec<u8>,
 	config:Arc<ConfigFile>,
+	codec:Option<image::ImageFormat>,
 	dummy_img:Arc<Vec<u8>>,
 	fontdb:Arc<resvg::usvg::fontdb::Database>,
 }
