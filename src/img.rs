@@ -140,7 +140,7 @@ impl RequestContext{
 		let size=size.unwrap();
 		let mut encoder=webp::AnimEncoder::new(size.0,size.1,&conf);
 		for (img,timestamp) in &image_buffer{
-			let aframe=webp::AnimFrame::from_image(img,*timestamp);
+			let aframe=image_to_frame(img,*timestamp);
 			if let Ok(aframe)=aframe{
 				encoder.add_frame(aframe);
 			}
@@ -190,5 +190,25 @@ impl RequestContext{
 				(axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
 			}
 		}
+	}
+}
+
+pub fn image_to_frame(image: &DynamicImage, timestamp: i32) -> Result<webp::AnimFrame, &'static str> {
+	match image {
+		DynamicImage::ImageLuma8(_) => Err("Unimplemented"),
+		DynamicImage::ImageLumaA8(_) => Err("Unimplemented"),
+		DynamicImage::ImageRgb8(image) => Ok(webp::AnimFrame::from_rgb(
+			image.as_ref(),
+			image.width(),
+			image.height(),
+			timestamp,
+		)),
+		DynamicImage::ImageRgba8(image) => Ok(webp::AnimFrame::from_rgba(
+			image.as_ref(),
+			image.width(),
+			image.height(),
+			timestamp,
+		)),
+		_ => Err("Unimplemented"),
 	}
 }
