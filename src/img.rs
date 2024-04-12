@@ -1,6 +1,6 @@
 
 use axum::response::IntoResponse;
-use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageDecoder};
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
 
 use crate::RequestContext;
 
@@ -58,13 +58,14 @@ impl RequestContext{
 		img
 	}
 	pub(crate) fn encode_img(&mut self)->axum::response::Response{
+		let codec=image::guess_format(&self.src_bytes);
+		self.codec=codec.as_ref().ok().copied();
 		if self.parms.r#static.is_some(){
 			return self.encode_single();
 		}
 		if self.parms.badge.is_some(){
 			return self.encode_single();
 		}
-		let codec=image::guess_format(&self.src_bytes);
 		let codec=match codec{
 			Ok(codec) => codec,
 			Err(e) => {
@@ -140,7 +141,7 @@ impl RequestContext{
 		let size=size.unwrap();
 		let mut encoder=webp::AnimEncoder::new(size.0,size.1,&conf);
 		for (img,timestamp) in &image_buffer{
-			let aframe=webp::AnimFrame::from_image(img,*timestamp);
+			let aframe=image_to_frame(img,*timestamp);
 			if let Ok(aframe)=aframe{
 				encoder.add_frame(aframe);
 			}
@@ -169,6 +170,12 @@ impl RequestContext{
 		self.response_img(img)
 	}
 	pub(crate) fn response_img(&mut self,img:DynamicImage)->axum::response::Response{
+		let img=match self.codec{
+			Some(image::ImageFormat::Jpeg)|Some(image::ImageFormat::Tiff)=>{
+				self.exif_rotate(img)
+			},
+			_=>img
+		};
 		let img=self.resize(img);
 		let mut buf=vec![];
 		let format=if self.parms.badge.is_some(){
@@ -190,5 +197,48 @@ impl RequestContext{
 				(axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
 			}
 		}
+	}
+	pub fn exif_rotate(&self,img:DynamicImage) -> DynamicImage{
+		let exifreader = rexif::parse_buffer_quiet(&self.src_bytes);
+		if let Ok(exif)=exifreader.0{
+			for e in exif.entries{
+				match e.tag{
+					rexif::ExifTag::Orientation=>{
+						return match e.value.to_i64(0).unwrap_or(0){
+							2=>DynamicImage::ImageRgba8(image::imageops::flip_horizontal(&img)),
+							3=>DynamicImage::ImageRgba8(image::imageops::rotate180(&img)),
+							4=>DynamicImage::ImageRgba8(image::imageops::flip_vertical(&img)),
+							5=>DynamicImage::ImageRgba8(image::imageops::flip_horizontal(&image::imageops::rotate90(&img))),
+							6=>DynamicImage::ImageRgba8(image::imageops::rotate90(&img)),
+							7=>DynamicImage::ImageRgba8(image::imageops::flip_horizontal(&image::imageops::rotate270(&img))),
+							8=>DynamicImage::ImageRgba8(image::imageops::rotate270(&img)),
+							_=>img,
+						};
+					},
+					_=>{}
+				}
+			}
+		}
+		img
+	}
+}
+
+pub fn image_to_frame(image: &DynamicImage, timestamp: i32) -> Result<webp::AnimFrame, &'static str> {
+	match image {
+		DynamicImage::ImageLuma8(_) => Err("Unimplemented"),
+		DynamicImage::ImageLumaA8(_) => Err("Unimplemented"),
+		DynamicImage::ImageRgb8(image) => Ok(webp::AnimFrame::from_rgb(
+			image.as_ref(),
+			image.width(),
+			image.height(),
+			timestamp,
+		)),
+		DynamicImage::ImageRgba8(image) => Ok(webp::AnimFrame::from_rgba(
+			image.as_ref(),
+			image.width(),
+			image.height(),
+			timestamp,
+		)),
+		_ => Err("Unimplemented"),
 	}
 }
