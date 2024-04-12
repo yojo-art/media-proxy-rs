@@ -119,6 +119,7 @@ async fn get_file(
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 	let mut headers=axum::headers::HeaderMap::new();
 	headers.append("X-Remote-Url",q.url.parse().unwrap());
+	headers.append("Vary","Accept,Range".parse().unwrap());
 	let req=client.get(&q.url);
 	let req=req.timeout(std::time::Duration::from_millis(config.timeout));
 	let req=req.header("UserAgent",config.user_agent.clone());
