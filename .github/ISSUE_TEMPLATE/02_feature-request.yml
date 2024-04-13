@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        ご提案ありがとうございます。
+        報告ありがとうございます。
         まず、重複したIssueが存在することを防ぐために、同じようなIssueが存在するか確認してください。
         次に、下記に必要な情報を記入してください。
   
@@ -14,20 +14,15 @@ body:
     attributes:
       label: 概要
       description: |
-        どんな機能が欲しいか、明確に記入してください。
+        どのような機能が欲しいか明確に記入してください。
     validations:
       required: true
   
-- type: textarea
-  attributes:
-    label: 理由
-    description: |
-      なぜその機能が欲しいのですか？
-  validations:
-    required: true
-
-- type: checkboxes
-  attributes:
-    label: あなた自身でその機能を実装しますか？
-    options:
-      - label: はい、私が自分で実装します。
+  - type: textarea
+    attributes:
+      label: 理由
+      description: |
+        なぜその機能が欲しいのですか？
+    validations:
+      required: true
+  
