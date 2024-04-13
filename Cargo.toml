@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["avif-decoder"]
+avif-decoder = ["image/avif-native","image/nasm"]
 
 [dependencies]
 tokio-stream = "*"
@@ -17,7 +20,9 @@ serde = {version="^1.0.164",features=["derive"]}
 serde_json ="1"
 reqwest = { version = "0.11", default-features = false , features = ["stream","rustls-tls-webpki-roots"] }
 image = "0.25"
-webp = "0.2.7"
+webp = { version = "0.2.7", default-features = false }
+resvg = {version="0.41",features = [ "text","memmap-fonts","raster-images" ] }
+rexif = "0.7.3"
 
 [profile.release]
 strip = true
