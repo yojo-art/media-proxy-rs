@@ -1,0 +1,66 @@
+name: バグ報告
+description: 何か不具合があった場合はこちら
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        報告ありがとうございます。
+        まず、重複したIssueが存在することを防ぐために、同じようなIssueが存在するか確認してください。
+        次に、下記に必要な情報を記入してください。ログやエラーコードなどがあると好ましいでしょう。
+  
+  - type: textarea
+    attributes:
+      label: 概要
+      description: |
+        どのような不具合が起こったか簡潔に記入してください。
+    validations:
+      required: true
+  
+  - type: textarea
+    attributes:
+      label: 期待する動作
+      description: |
+        本来どのように動作するべきか記入してください。
+    validations:
+      required: true
+  
+  - type: textarea
+    attributes:
+      label: 実際の動作
+      description: |
+        実際はどのような動作をしましたか？どのような不具合ですか？
+    validations:
+      required: true
+  
+  - type: textarea
+    attributes:
+      label: 再現方法
+      placeholder: |
+        1.
+        2.
+        3.
+      validations:
+        required: false
+  
+  - type: textarea
+    attributes:
+      label: ログ・エラーコード
+      description: |
+        不具合発生時のログやエラーコードがあれば、こちらに記入してください。
+      render: shell
+      validations:
+        required: false
+  
+  - type: textarea
+    attributes:
+      label: 動作環境
+      description: |
+        どのような環境で不具合が発生しましたか？
+      value: |
+        * OSとアーキテクチャ
+        * インストール方法
+      validations:
+        required: false
+  
