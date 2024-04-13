@@ -9,8 +9,7 @@ WORKDIR /app
 COPY .cargo /.cargo
 COPY src ./src
 COPY Cargo.toml ./Cargo.toml
-COPY Cargo.lock ./Cargo.lock
-RUN --mount=type=cache,target=/var/cache/cargo cargo fetch --locked
+RUN --mount=type=cache,target=/var/cache/cargo cargo fetch
 ENV RUSTC_WRAPPER=/usr/local/bin/sccache
 ENV SCCACHE_DIR=/var/cache/sccache
 RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/var/cache/sccache cargo build --release --offline
