@@ -1,4 +1,4 @@
 blank_issues_enabled: false
 contact_links:
-  - name: GitHub
-    url: https://github.com/yojo-art/media-proxy-rs/issue
+  - name: Found Bugs?
+    url: https://github.com/yojo-art/media-proxy-rs/issues/new

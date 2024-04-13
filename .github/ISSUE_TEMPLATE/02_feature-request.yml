@@ -1,33 +1,33 @@
-name: 新しい機能の追加
-description: 新しい機能の追加要望はこちら
+name: 新機能追加
+description: 新しい機能の追加をリクエストするならこちら
 labels: ["enhancement"]
 
 body:
   - type: markdown
-    attributes: 
-      value:
-        description: |
-          ご提案ありがとうございます。
-          まず、重複したIssueが存在することを防ぐために、同じようなIssueが存在するか確認してください。
-          次に、下記に必要な情報を記入してください。
+    attributes:
+      value: |
+        ご提案ありがとうございます。
+        まず、重複したIssueが存在することを防ぐために、同じようなIssueが存在するか確認してください。
+        次に、下記に必要な情報を記入してください。
   
   - type: textarea
     attributes:
       label: 概要
-      description: | 
-        あなたが要望する新しい機能の概要を記入してください。
-    validations: true
-
-  - type: textarea
-    attributes:
-      label: 理由
       description: |
-        なぜその機能が欲しいのですか？
+        どんな機能が欲しいか、明確に記入してください。
     validations:
       required: true
   
-  - type: checkboxes
-    attributes:
-     label: あなた自身でその機能を実装しますか？
-     options: 
+- type: textarea
+  attributes:
+    label: 理由
+    description: |
+      なぜその機能が欲しいのですか？
+  validations:
+    required: true
+
+- type: checkboxes
+  attributes:
+    label: あなた自身でその機能を実装しますか？
+    options:
       - label: はい、私が自分で実装します。

@@ -41,8 +41,8 @@ body:
         1.
         2.
         3.
-      validations:
-        required: false
+    validations:
+      required: false
   
   - type: textarea
     attributes:
@@ -50,8 +50,8 @@ body:
       description: |
         不具合発生時のログやエラーコードがあれば、こちらに記入してください。
       render: shell
-      validations:
-        required: false
+    validations:
+      required: false
   
   - type: textarea
     attributes:
@@ -61,6 +61,6 @@ body:
       value: |
         * OSとアーキテクチャ
         * インストール方法
-      validations:
-        required: false
+    validations:
+      required: false
   
