@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
 default = ["avif-decoder"]
-avif-decoder = ["image/avif-native","image/nasm"]
+avif-decoder = ["dep:avif-decoder_dep"]
 
 [dependencies]
 tokio-stream = "*"
@@ -23,6 +23,7 @@ image = "0.25"
 webp = { version = "0.2.7", default-features = false }
 resvg = {version="0.41",features = [ "text","memmap-fonts","raster-images" ] }
 rexif = "0.7.3"
+avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
 
 [profile.release]
 strip = true
