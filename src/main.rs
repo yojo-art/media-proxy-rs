@@ -7,6 +7,7 @@ use tokio_stream::StreamExt;
 mod img;
 mod svg;
 mod browsersafe;
+mod image_test;
 
 #[derive(Debug,Serialize,Deserialize)]
 pub struct ConfigFile{
