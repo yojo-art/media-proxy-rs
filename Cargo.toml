@@ -28,7 +28,7 @@ avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
 [profile.release]
 strip = true
 opt-level = 3
-lto = true
+lto = "thin"
 panic = "abort"
 
 [profile.dev]
