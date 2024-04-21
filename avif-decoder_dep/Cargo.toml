@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 image = { version = "*" , features = ["avif-native"] }
 
-[target.'cfg(target_arch = "x86_64")'.dependencies.image]
+[target.'cfg(any(target_arch = "x86",target_arch = "x86_64"))'.dependencies.image]
 version = "*"
 default-features = false
 features = ["nasm"]
