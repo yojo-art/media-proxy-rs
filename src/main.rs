@@ -348,7 +348,8 @@ impl RequestContext{
 				self.headers.append("Content-Type","image/png".parse().unwrap());
 				(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
 			}else{
-				axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+				self.headers.append("X-Proxy-Error",format!("status:{}",status.as_u16()).parse().unwrap());
+				(axum::http::StatusCode::INTERNAL_SERVER_ERROR,self.headers.clone()).into_response()
 			})
 		}
 	}
