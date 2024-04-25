@@ -127,7 +127,7 @@ async fn get_file(
 	}
 	let req=client.get(&q.url);
 	let req=req.timeout(std::time::Duration::from_millis(config.timeout));
-	let req=req.header("UserAgent",config.user_agent.clone());
+	let req=req.header("User-Agent",config.user_agent.clone());
 	let req=if let Some(range)=client_headers.get("Range"){
 		req.header("Range",range.as_bytes())
 	}else{
