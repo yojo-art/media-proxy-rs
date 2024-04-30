@@ -24,6 +24,7 @@ webp = { version = "0.3.0", default-features = false }
 resvg = {version="0.41",features = [ "text","memmap-fonts","raster-images" ] }
 rexif = "0.7.3"
 avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
+chrono = "0.4"
 
 [profile.release]
 strip = true

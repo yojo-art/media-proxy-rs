@@ -120,6 +120,16 @@ async fn get_file(
 	(client,config,dummy_img,fontdb):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>,Arc<resvg::usvg::fontdb::Database>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+	println!("{}\t{}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
+		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+		q.url,
+		q.avatar,
+		q.preview,
+		q.badge,
+		q.emoji,
+		q.r#static,
+		q.fallback,
+	);
 	let mut headers=axum::headers::HeaderMap::new();
 	headers.append("X-Remote-Url",q.url.parse().unwrap());
 	if config.encode_avif{
