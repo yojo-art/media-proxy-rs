@@ -6,7 +6,7 @@
 ## 設定ファイル
 環境変数`MEDIA_PROXY_CONFIG_PATH`を設定する事でファイルの場所を指定できます  
 デフォルト値は`$(pwd)/config.json`です  
-非力なマシンでAVIFエンコードを利用すると非常に遅いので`encode_avif`を`false`に変更することをおすすめします
+十分に強力なマシンでは`encode_avif`を`true`に変更することでAVIFエンコードを利用する事ができます
 
 ## target support
 - [x] x86_64-unknown-linux-musl
