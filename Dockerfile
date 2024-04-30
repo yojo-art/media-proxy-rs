@@ -23,6 +23,7 @@ COPY avif-decoder_dep ./avif-decoder_dep
 COPY src ./src
 COPY Cargo.toml ./Cargo.toml
 COPY asset ./asset
+COPY examples ./examples
 RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/app/target sh /app/crossfiles/build.sh
 
 FROM alpine:latest
@@ -33,5 +34,8 @@ WORKDIR /media-proxy-rs
 USER proxy
 COPY asset ./asset
 COPY --from=1 /app/media-proxy-rs ./media-proxy-rs
+COPY --from=1 /app/healthcheck ./healthcheck
+RUN sh -c "./media-proxy-rs&" && ./healthcheck 12887 http://127.0.0.1:12766/test.webp
+HEALTHCHECK --interval=30s --timeout=3s CMD ./healthcheck 5555 http://127.0.0.1:12766/test.webp || exit 1
 EXPOSE 12766
 CMD ["./media-proxy-rs"]
