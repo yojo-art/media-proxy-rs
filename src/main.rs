@@ -67,7 +67,7 @@ fn main() {
 	if !std::path::Path::new(&config_path).exists(){
 		let default_config=ConfigFile{
 			bind_addr: "0.0.0.0:12766".to_owned(),
-			timeout:1000,
+			timeout:10000,
 			user_agent: "https://github.com/yojo-art/media-proxy-rs".to_owned(),
 			max_size:256*1024*1024,
 			proxy:None,
@@ -108,18 +108,28 @@ fn main() {
 		let http_addr:SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
 		let app = Router::new();
 		let arg_tup0=arg_tup.clone();
-		let app=app.route("/",axum::routing::get(move|path,headers,parms|get_file(path,headers,arg_tup0.clone(),parms)));
-		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(path,headers,arg_tup.clone(),parms)));
+		let app=app.route("/",axum::routing::get(move|headers,parms|get_file(None,headers,arg_tup0.clone(),parms)));
+		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
 		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 	});
 }
 
 async fn get_file(
-	axum::extract::Path(_path):axum::extract::Path<String>,
+	_path:Option<axum::extract::Path<String>>,
 	client_headers:axum::http::HeaderMap,
 	(client,config,dummy_img,fontdb):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>,Arc<resvg::usvg::fontdb::Database>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 )->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+	println!("{}\t{}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
+		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+		q.url,
+		q.avatar,
+		q.preview,
+		q.badge,
+		q.emoji,
+		q.r#static,
+		q.fallback,
+	);
 	let mut headers=axum::headers::HeaderMap::new();
 	headers.append("X-Remote-Url",q.url.parse().unwrap());
 	if config.encode_avif{
