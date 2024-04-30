@@ -108,14 +108,14 @@ fn main() {
 		let http_addr:SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
 		let app = Router::new();
 		let arg_tup0=arg_tup.clone();
-		let app=app.route("/",axum::routing::get(move|path,headers,parms|get_file(path,headers,arg_tup0.clone(),parms)));
-		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(path,headers,arg_tup.clone(),parms)));
+		let app=app.route("/",axum::routing::get(move|headers,parms|get_file(None,headers,arg_tup0.clone(),parms)));
+		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
 		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 	});
 }
 
 async fn get_file(
-	axum::extract::Path(_path):axum::extract::Path<String>,
+	_path:Option<axum::extract::Path<String>>,
 	client_headers:axum::http::HeaderMap,
 	(client,config,dummy_img,fontdb):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>,Arc<resvg::usvg::fontdb::Database>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
