@@ -79,7 +79,7 @@ fn main() {
 			].to_vec(),
 			load_system_fonts:true,
 			webp_quality: 75f32,
-			encode_avif:true,
+			encode_avif:false,
 		};
 		let default_config=serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path).expect("create default config.json").write_all(default_config.as_bytes()).unwrap();
