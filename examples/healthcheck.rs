@@ -18,12 +18,16 @@ fn main() {
 		}));
 		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 	});
+	let client=reqwest::Client::builder();
+	let client=client.timeout(std::time::Duration::from_millis(500));
+	let client=client.build().unwrap();
 	let mut local_ok=false;
 	for _ in 0..20{
 		std::thread::sleep(std::time::Duration::from_millis(50));
 		let self_url=self_url.clone();
+		let client=client.clone();
 		let status=rt.block_on(async move{
-			if let Ok(s)=reqwest::get(self_url).await{
+			if let Ok(s)=client.get(self_url).send().await{
 				s.status().as_u16()
 			}else{
 				504
@@ -41,8 +45,9 @@ fn main() {
 	}
 	for _ in 0..5{
 		let self_url=self_url.to_string();
+		let client=client.clone();
 		let status=rt.block_on(async move{
-			if let Ok(s)=reqwest::get(format!("{}?url={}",target_url,self_url)).await{
+			if let Ok(s)=client.get(format!("{}?url={}",target_url,self_url)).send().await{
 				s.status().as_u16()
 			}else{
 				504
