@@ -115,7 +115,15 @@ impl RequestContext{
 		let mut size:Option<(u32, u32)>=None;
 		{
 			let mut timestamp=0;
+			const FRAMES_LIMIT:u32=1000;
+			let mut allow_frames=FRAMES_LIMIT;
 			for frame in frames{
+				allow_frames-=1;
+				if allow_frames==0{
+					let mut headers=self.headers.clone();
+					headers.append("X-Proxy-Error",format!("FramesLimit {}",FRAMES_LIMIT).parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
+				}
 				if let Ok(frame)=frame{
 					timestamp+=std::time::Duration::from(frame.delay()).as_millis() as i32;
 					let img=image::DynamicImage::ImageRgba8(frame.into_buffer());
@@ -130,6 +138,8 @@ impl RequestContext{
 						size=Some((img.width(),img.height()));
 					}
 					image_buffer.push((img,timestamp));
+				}else{
+					break;
 				}
 			}
 		}
