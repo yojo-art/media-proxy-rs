@@ -131,7 +131,9 @@ async fn get_file(
 		q.fallback,
 	);
 	let mut headers=axum::headers::HeaderMap::new();
-	headers.append("X-Remote-Url",q.url.parse().unwrap());
+	if let Ok(url)=q.url.parse(){
+		headers.append("X-Remote-Url",url);
+	}
 	if config.encode_avif{
 		headers.append("Vary","Accept,Range".parse().unwrap());
 	}
