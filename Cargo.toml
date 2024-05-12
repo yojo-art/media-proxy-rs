@@ -22,9 +22,10 @@ reqwest = { version = "0.11", default-features = false , features = ["stream","r
 image = "0.25"
 webp = { version = "0.3.0", default-features = false }
 resvg = {version="0.41",features = [ "text","memmap-fonts","raster-images" ] }
-rexif = "0.7.3"
+rexif = "0.7"
 avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
 chrono = "0.4"
+fast_image_resize = "3.0"
 
 [profile.release]
 strip = true

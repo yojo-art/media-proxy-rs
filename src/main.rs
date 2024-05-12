@@ -53,6 +53,17 @@ impl Into<image::imageops::FilterType> for FilterType{
 		}
 	}
 }
+impl Into<fast_image_resize::FilterType> for FilterType{
+	fn into(self) -> fast_image_resize::FilterType {
+		match self {
+			FilterType::Nearest => fast_image_resize::FilterType::Box,
+			FilterType::Triangle => fast_image_resize::FilterType::Bilinear,
+			FilterType::CatmullRom => fast_image_resize::FilterType::CatmullRom,
+			FilterType::Gaussian => fast_image_resize::FilterType::Mitchell,
+			FilterType::Lanczos3 => fast_image_resize::FilterType::Lanczos3,
+		}
+	}
+}
 fn main() {
 	let config_path=match std::env::var("MEDIA_PROXY_CONFIG_PATH"){
 		Ok(path)=>{
