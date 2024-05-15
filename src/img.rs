@@ -98,7 +98,38 @@ impl RequestContext{
 					Err(_)=>return self.encode_single()
 				};
 				if a.has_animation(){
-					self.encode_anim(a.into_frames())
+					let decoder=webp::AnimDecoder::new(&self.src_bytes);
+					if let Ok(mut dec)=decoder.decode(){
+						let mut offset=0;
+						let mut frames=vec![];
+						dec.sort_by_time_stamp();
+						for frame in dec.into_iter(){
+							let img=if frame.get_layout().is_alpha() {
+								let image =
+									image::ImageBuffer::from_raw(frame.width(), frame.height(), frame.get_image().to_owned())
+										.expect("ImageBuffer couldn't be created");
+								image
+							} else {
+								let image =
+									image::ImageBuffer::from_raw(frame.width(), frame.height(), frame.get_image().to_owned())
+										.expect("ImageBuffer couldn't be created");
+								DynamicImage::ImageRgb8(image).into_rgba8()
+							};
+							let delay=frame.get_time_ms()-offset;
+							offset=frame.get_time_ms();
+							if delay<0{
+								continue;
+							}
+							let delay=std::time::Duration::from_millis(delay as u64);
+							let delay=image::Delay::from_saturating_duration(delay);
+							let frame=image::Frame::from_parts(img,0,0,delay);
+							frames.push(Ok(frame));
+						}
+						let frames=image::Frames::new(Box::new(frames.into_iter()));
+						self.encode_anim(frames)
+					}else{
+						self.encode_anim(a.into_frames())
+					}
 				}else{
 					self.encode_single()
 				}
