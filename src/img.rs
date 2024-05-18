@@ -57,15 +57,13 @@ impl RequestContext{
 		resize(img,max_width,max_height,filter)
 	}
 	pub(crate) fn encode_img(&mut self)->axum::response::Response{
-		let codec=image::guess_format(&self.src_bytes);
-		self.codec=codec.as_ref().ok().copied();
 		if self.parms.r#static.is_some(){
 			return self.encode_single();
 		}
 		if self.parms.badge.is_some(){
 			return self.encode_single();
 		}
-		let codec=match codec{
+		let codec=match &self.codec{
 			Ok(codec) => codec,
 			Err(e) => {
 				self.headers.append("X-Proxy-Error",format!("CodecError:{:?}",e).parse().unwrap());
@@ -214,7 +212,7 @@ impl RequestContext{
 	}
 	pub(crate) fn response_img(&mut self,img:DynamicImage)->axum::response::Response{
 		let img=match self.codec{
-			Some(image::ImageFormat::Jpeg)|Some(image::ImageFormat::Tiff)=>{
+			Ok(image::ImageFormat::Jpeg)|Ok(image::ImageFormat::Tiff)=>{
 				self.exif_rotate(img)
 			},
 			_=>img

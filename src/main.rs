@@ -1,4 +1,4 @@
-use std::{io::{Read, Write}, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{io::{Read, Write}, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
 use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
@@ -216,7 +216,7 @@ async fn get_file(
 		parms:q,
 		src_bytes:Vec::new(),
 		config,
-		codec:None,
+		codec:Err(None),
 		dummy_img,
 		fontdb,
 	}.encode(resp,is_img).await
@@ -227,7 +227,7 @@ struct RequestContext{
 	parms:RequestParams,
 	src_bytes:Vec<u8>,
 	config:Arc<ConfigFile>,
-	codec:Option<image::ImageFormat>,
+	codec:Result<image::ImageFormat,Option<image::ImageError>>,
 	dummy_img:Arc<Vec<u8>>,
 	fontdb:Arc<resvg::usvg::fontdb::Database>,
 }
@@ -319,6 +319,11 @@ impl RequestContext{
 				}
 			}
 		}
+		let status=resp.status();
+		let resp=PreDataStream::new(resp).await;
+		if let Some(Ok(head))=resp.head.as_ref(){
+			self.codec=image::guess_format(head).map_err(|e|Some(e));
+		}
 		if is_svg{
 			self.load_all(resp).await?;
 			if let Ok(img)=self.encode_svg(&self.fontdb){
@@ -331,7 +336,10 @@ impl RequestContext{
 			}else{
 				return Err((axum::http::StatusCode::OK,self.headers.clone(),self.src_bytes.clone()).into_response());
 			}
-		}else if is_img{
+		}else if is_img||self.codec.is_ok(){
+			self.headers.remove("Content-Length");
+			self.headers.remove("Content-Range");
+			self.headers.remove("Accept-Ranges");
 			self.load_all(resp).await?;
 			let resp=self.encode_img();
 			if self.parms.fallback.is_some(){
@@ -355,8 +363,7 @@ impl RequestContext{
 				Self::disposition_ext(&mut self.headers,".unknown");
 			}
 		}
-		let status=resp.status();
-		let body=StreamBody::new(resp.bytes_stream());
+		let body=StreamBody::new(resp);
 		if status.is_success(){
 			self.headers.remove("Cache-Control");
 			self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
@@ -376,15 +383,14 @@ impl RequestContext{
 			})
 		}
 	}
-	async fn load_all(&mut self,resp: reqwest::Response)->Result<(),axum::response::Response>{
-		let len_hint=resp.content_length().unwrap_or(2048.min(self.config.max_size));
+	async fn load_all(&mut self,mut resp: PreDataStream)->Result<(),axum::response::Response>{
+		let len_hint=resp.content_length.unwrap_or(2048.min(self.config.max_size));
 		if len_hint>self.config.max_size{
 			self.headers.append("X-Proxy-Error",format!("lengthHint:{}>{}",len_hint,self.config.max_size).parse().unwrap());
 			return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
 		}
 		let mut response_bytes=Vec::with_capacity(len_hint as usize);
-		let mut stream=resp.bytes_stream();
-		while let Some(x) = stream.next().await{
+		while let Some(x) = resp.next().await{
 			match x{
 				Ok(b)=>{
 					if response_bytes.len()+b.len()>self.config.max_size as usize{
@@ -401,5 +407,33 @@ impl RequestContext{
 		}
 		self.src_bytes=response_bytes;
 		Ok(())
+	}
+}
+struct PreDataStream{
+	content_length:Option<u64>,
+	head:Option<Result<axum::body::Bytes, reqwest::Error>>,
+	last:Pin<Box<dyn futures::stream::Stream<Item=Result<axum::body::Bytes, reqwest::Error>>+Send+Sync>>,
+}
+impl  PreDataStream{
+	async fn new(value: reqwest::Response) -> Self {
+		let content_length=value.content_length();
+		let mut stream=value.bytes_stream();
+		let head=stream.next().await;
+		Self{
+			content_length,
+			head,
+			last: Box::pin(stream)
+		}
+	}
+}
+impl futures::stream::Stream for PreDataStream{
+	type Item=Result<axum::body::Bytes, reqwest::Error>;
+
+	fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+		let mut r=self.as_mut();
+		if let Some(d)=r.head.take(){
+			return std::task::Poll::Ready(Some(d));
+		}
+		r.last.as_mut().poll_next(cx)
 	}
 }
