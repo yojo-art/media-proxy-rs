@@ -64,6 +64,30 @@ impl Into<fast_image_resize::FilterType> for FilterType{
 		}
 	}
 }
+async fn shutdown_signal() {
+	use tokio::signal;
+	use futures::{future::FutureExt,pin_mut};
+	let ctrl_c = async {
+		signal::ctrl_c()
+			.await
+			.expect("failed to install Ctrl+C handler");
+	}.fuse();
+
+	#[cfg(unix)]
+	let terminate = async {
+		signal::unix::signal(signal::unix::SignalKind::terminate())
+			.expect("failed to install signal handler")
+			.recv()
+			.await;
+	}.fuse();
+	#[cfg(not(unix))]
+	let terminate = std::future::pending::<()>().fuse();
+	pin_mut!(ctrl_c, terminate);
+	futures::select!{
+		_ = ctrl_c => {},
+		_ = terminate => {},
+	}
+}
 fn main() {
 	let config_path=match std::env::var("MEDIA_PROXY_CONFIG_PATH"){
 		Ok(path)=>{
@@ -121,7 +145,7 @@ fn main() {
 		let arg_tup0=arg_tup.clone();
 		let app=app.route("/",axum::routing::get(move|headers,parms|get_file(None,headers,arg_tup0.clone(),parms)));
 		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
-		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await.unwrap();
 	});
 }
 
