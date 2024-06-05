@@ -397,13 +397,22 @@ impl RequestContext{
 				Ok((axum::http::StatusCode::OK,self.headers.clone(),body))
 			}
 		}else{
+			self.headers.append("X-Proxy-Error",format!("status:{}",status.as_u16()).parse().unwrap());
 			Err(if self.parms.fallback.is_some(){
 				self.headers.remove("Content-Type");
 				self.headers.append("Content-Type","image/png".parse().unwrap());
 				(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
 			}else{
-				self.headers.append("X-Proxy-Error",format!("status:{}",status.as_u16()).parse().unwrap());
-				(axum::http::StatusCode::INTERNAL_SERVER_ERROR,self.headers.clone()).into_response()
+				let status=match status{
+					reqwest::StatusCode::BAD_REQUEST=>axum::http::StatusCode::BAD_REQUEST,
+					reqwest::StatusCode::FORBIDDEN=>axum::http::StatusCode::FORBIDDEN,
+					reqwest::StatusCode::NOT_FOUND=>axum::http::StatusCode::NOT_FOUND,
+					reqwest::StatusCode::REQUEST_TIMEOUT=>axum::http::StatusCode::GATEWAY_TIMEOUT,
+					reqwest::StatusCode::GONE=>axum::http::StatusCode::GONE,
+					reqwest::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS=>axum::http::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+					_=>axum::http::StatusCode::BAD_GATEWAY,
+				};
+				(status,self.headers.clone()).into_response()
 			})
 		}
 	}
