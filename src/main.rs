@@ -329,24 +329,15 @@ impl RequestContext{
 				is_svg=true;
 			}
 		}
-		if !is_svg&&!is_img{
-			if let Some(cd)=self.headers.get("Content-Disposition"){
-				let s=std::str::from_utf8(cd.as_bytes());
-				if let Ok(s)=s{
-					for e in s.split(";"){
-						if e.starts_with("filename"){
-							if e.contains(".svg"){
-								is_svg=true;
-							}
-						}
-					}
-				}
-			}
-		}
 		let status=resp.status();
 		let resp=PreDataStream::new(resp).await;
 		if let Some(Ok(head))=resp.head.as_ref(){
-			self.codec=image::guess_format(head).map_err(|e|Some(e));
+			//utf8にパースできて空白文字を削除した後の先頭部分が<svgの場合はsvg
+			if std::str::from_utf8(&head).map(|s|s.trim().starts_with("<svg")).unwrap_or(false){
+				is_svg=true;
+			}else{
+				self.codec=image::guess_format(head).map_err(|e|Some(e));
+			}
 		}
 		if is_svg{
 			self.load_all(resp).await?;
