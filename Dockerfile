@@ -10,16 +10,20 @@ FROM --platform=$BUILDPLATFORM rust:alpine
 ARG BUILDARCH
 ARG TARGETARCH
 ARG TARGETVARIANT
-RUN apk add --no-cache clang musl-dev curl pkgconfig nasm mold
+RUN apk add --no-cache clang musl-dev curl pkgconfig nasm mold git
 ENV PKG_CONFIG_PATH=/dav1d/lib/pkgconfig
 ENV LD_LIBRARY_PATH=/dav1d/lib
 ENV CARGO_HOME=/var/cache/cargo
 ENV SYSTEM_DEPS_LINK=static
 COPY crossfiles /app/crossfiles
 RUN sh /app/crossfiles/deps.sh
-COPY --from=0 /dav1d /dav1d
+RUN git init
 WORKDIR /app
 COPY avif-decoder_dep ./avif-decoder_dep
+COPY .gitmodules ./.gitmodules
+COPY image-rs ./image-rs
+RUN git submodule update --init
+COPY --from=0 /dav1d /dav1d
 COPY src ./src
 COPY Cargo.toml ./Cargo.toml
 COPY asset ./asset
