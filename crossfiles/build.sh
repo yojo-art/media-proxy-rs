@@ -4,7 +4,7 @@ if [ -f "/app/crossfiles/${TARGETARCH}.sh" ]; then
 else
 	source /app/crossfiles/${TARGETARCH}/${TARGETVARIANT}.sh
 fi
-cp -r /dav1d/lib /${MUSL_NAME}/dav1d/lib
+cp -r /dav1d/lib /musl/${MUSL_NAME}/dav1d/lib
 mkdir ./.cargo/
 echo "[target.${RUST_TARGET}]" >> ./.cargo/config.toml
 echo 'rustflags = ["-C", "link-arg=-fuse-ld=/usr/bin/mold"]' >> ./.cargo/config.toml

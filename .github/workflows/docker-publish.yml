@@ -85,7 +85,9 @@ jobs:
           cache-map: |
             {
               "cargo-home": "/var/cache/cargo",
-              "app-target": "/app/target"
+              "app-target": "/app/target",
+              "musl-tools": "/musl",
+              "dav1d-libs": "/dav1d_bin"
             }
           skip-extraction: ${{ steps.cache.outputs.cache-hit }}
       # Build and push Docker image with Buildx (don't push on PR)
@@ -99,7 +101,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Export digest
         run: |
