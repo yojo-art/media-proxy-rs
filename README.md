@@ -27,5 +27,5 @@ Dockerを使用する場合はbuildxとqemuによるクロスコンパイルが�
 すべてを静的に組み込むmusl系とは異なる共有ライブラリを必要とする場合があります
 1. https://www.rust-lang.org/ja/tools/install に従ってrustをインストール
 1. `apt-get install -y meson ninja-build pkg-config nasm git`
-2. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
+2. `git clone --recursive https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
 3. `cargo build --release`
