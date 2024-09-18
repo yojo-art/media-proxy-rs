@@ -1,7 +1,7 @@
 # media-proxy-rs
 ## misskey/cherrypick用メディアプロキシのrust実装
 機能的には互換性を維持しつつ、apngとavif対応に  
-ほとんどの画像読み書きに[image crate v0.25](https://crates.io/crates/image/0.25.1)を使用しています
+ほとんどの画像読み書きに[image crate v0.25.2](https://crates.io/crates/image/0.25.2)を使用しています
 
 ## 設定ファイル
 環境変数`MEDIA_PROXY_CONFIG_PATH`を設定する事でファイルの場所を指定できます  
@@ -19,7 +19,7 @@
 ## ビルド(x64/aarch64 Docker)
 Dockerを使用する場合はbuildxとqemuによるクロスコンパイルが利用できます  
 ビルド対象プラットフォームはtarget supportの項目を参照してください
-1. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
+1. `git clone --recursive https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
 2. `docker build -t media-proxy-rs .`
 
 ## ビルド(x64 Debian系)
