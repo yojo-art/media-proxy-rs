@@ -1,4 +1,6 @@
 /target
 /config.json
 /Cargo.lock
+/compose.yml
+/config/config.json
 

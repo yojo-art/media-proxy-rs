@@ -1,0 +1,13 @@
+version: "3"
+services:
+  server:
+    image: ghcr.io/yojo-art/media-proxy-rs:main
+#    build: .
+    restart: always
+    environment:
+      - MEDIA_PROXY_CONFIG_PATH=/config/config.json
+    volumes:
+      - ./config/:/config
+    ports:
+      - "80:12766"
+
