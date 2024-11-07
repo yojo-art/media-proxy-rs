@@ -324,10 +324,13 @@ impl RequestContext{
 impl RequestContext{
 	async fn encode(&mut self,resp: reqwest::Response,is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 		let mut is_svg=false;
+		let mut content_type=None;
 		if let Some(media)=self.headers.get("Content-Type"){
 			let s=String::from_utf8_lossy(media.as_bytes());
 			if s.as_ref()=="image/svg+xml"{
 				is_svg=true;
+			}else{
+				content_type=Some(s);
 			}
 		}
 		let status=resp.status();
@@ -339,8 +342,8 @@ impl RequestContext{
 			}else{
 				self.codec=image::guess_format(head).map_err(|e|Some(e));
 				if self.codec.is_err(){
-					if let Some(Ok(content_type))=self.headers.get("Content-Type").map(|h|str::from_utf8(h.as_bytes())){
-						match content_type{
+					if let Some(content_type)=content_type.as_ref(){
+						match content_type.as_ref(){
 							"image/x-targa"|"image/x-tga"=>self.codec=Ok(image::ImageFormat::Tga),
 							_=>{}
 						}

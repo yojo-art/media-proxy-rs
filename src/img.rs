@@ -200,11 +200,18 @@ impl RequestContext{
 		(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
 	}
 	fn encode_single(&mut self)->axum::response::Response{
-		let img=image::load_from_memory(&self.src_bytes);
+		let img=match &self.codec{
+			Ok(codec)=>image::load_from_memory_with_format(&self.src_bytes,*codec).map_err(|e|format!("{:?}",e)),
+			Err(Some(e))=>Err(format!("{:?}",e)),
+			_=>{
+				self.headers.append("X-Proxy-Error","Unknown Format".parse().unwrap());
+				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+			}
+		};
 		let img=match img{
 			Ok(img)=>img,
 			Err(e)=>{
-				self.headers.append("X-Proxy-Error",format!("DecodeError_{:?}",e).parse().unwrap());
+				self.headers.append("X-Proxy-Error",format!("DecodeError_{}",e).parse().unwrap());
 				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			}
 		};
