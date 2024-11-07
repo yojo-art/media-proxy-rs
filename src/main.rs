@@ -1,3 +1,4 @@
+use core::str;
 use std::{io::{Read, Write}, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
 use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
@@ -337,6 +338,14 @@ impl RequestContext{
 				is_svg=true;
 			}else{
 				self.codec=image::guess_format(head).map_err(|e|Some(e));
+				if self.codec.is_err(){
+					if let Some(Ok(content_type))=self.headers.get("Content-Type").map(|h|str::from_utf8(h.as_bytes())){
+						match content_type{
+							"image/x-targa"|"image/x-tga"=>self.codec=Ok(image::ImageFormat::Tga),
+							_=>{}
+						}
+					}
+				}
 			}
 		}
 		if is_svg{
