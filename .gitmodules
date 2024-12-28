@@ -1,3 +1,0 @@
-[submodule "image-rs"]
-	path = image-rs
-	url = https://github.com/kozakura913/image.git
