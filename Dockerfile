@@ -1,6 +1,9 @@
 FROM alpine:latest AS dav1d
-COPY dav1d_build.sh /dav1d_build.sh
-RUN --mount=type=cache,target=/dav1d_bin sh /dav1d_build.sh
+RUN apk add --no-cache clang musl-dev meson ninja pkgconfig nasm git
+RUN git clone --branch 1.3.0 --depth 1 https://code.videolan.org/videolan/dav1d.git /dav1d_src
+RUN cd /dav1d_src && meson build -Dprefix=/dav1d -Denable_tools=false -Denable_examples=false -Ddefault_library=static --buildtype release
+RUN cd /dav1d_src && ninja -C build
+RUN cd /dav1d_src && ninja -C build install
 
 FROM --platform=$BUILDPLATFORM rust:alpine AS build_base
 ARG BUILDARCH
@@ -12,7 +15,7 @@ ENV LD_LIBRARY_PATH=/dav1d/lib
 ENV CARGO_HOME=/var/cache/cargo
 ENV SYSTEM_DEPS_LINK=static
 COPY crossfiles /app/crossfiles
-RUN --mount=type=cache,target=/musl sh /app/crossfiles/deps.sh
+RUN sh /app/crossfiles/deps.sh
 WORKDIR /app
 COPY avif-decoder_dep ./avif-decoder_dep
 COPY .gitmodules ./.gitmodules
@@ -21,7 +24,7 @@ COPY src ./src
 COPY Cargo.toml ./Cargo.toml
 COPY asset ./asset
 COPY examples ./examples
-RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/app/target --mount=type=cache,target=/musl sh /app/crossfiles/build.sh
+RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/app/target sh /app/crossfiles/build.sh
 
 FROM alpine:latest
 ARG UID="852"

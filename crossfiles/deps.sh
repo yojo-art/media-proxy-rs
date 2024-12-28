@@ -5,9 +5,6 @@ else
 	source /app/crossfiles/${TARGETARCH}/${TARGETVARIANT}.sh
 fi
 rustup target add ${RUST_TARGET}
-if [ -d "/musl/${MUSL_NAME}" ]; then
-	:
-else
-	curl -sSL https://musl.cc/${MUSL_NAME}.tgz | tar -zxf - -C /musl
-fi
+mkdir /musl
+curl -sSL https://musl.cc/${MUSL_NAME}.tgz | tar -zxf - -C /musl
 mkdir -p /musl/${MUSL_NAME}/dav1d/
