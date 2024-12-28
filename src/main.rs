@@ -353,6 +353,11 @@ impl RequestContext{
 						self.headers.remove("Content-Type");
 						self.headers.append("Content-Type", "image/jxl".parse().unwrap());
 					}
+					if head.starts_with(&[0xFF,0x4F,0xFF,0x51])||head.starts_with(&[0x00,0x00,0x00,0x0C,0x6A,0x50,0x20,0x20,0x0D,0x0A,0x87,0x0A]){
+						is_img=true;
+						self.headers.remove("Content-Type");
+						self.headers.append("Content-Type", "image/jp2".parse().unwrap());
+					}
 				}
 			}
 		}

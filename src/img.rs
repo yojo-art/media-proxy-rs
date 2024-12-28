@@ -66,13 +66,36 @@ impl RequestContext{
 		let codec=match &self.codec{
 			Ok(codec) => codec,
 			Err(e) => {
-				if self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes()))==Some(Ok("image/jxl")){
-					let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes)).expect("cannot decode image");
-					let img = DynamicImage::from_decoder(decoder).expect("cannot decode image");
-					return self.response_img(img);
+				match self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes())){
+					Some(Ok("image/jxl"))=>{
+						let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes));
+						let img=decoder.map(|decoder|DynamicImage::from_decoder(decoder)).unwrap_or_else(|e|Err(e));
+						let img=match img{
+							Ok(img) => img,
+							Err(e) => {
+								self.headers.append("X-Proxy-Error",format!("JpegXL Error:{:?}",e).parse().unwrap());
+								return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+							},
+						};
+						return self.response_img(img);
+					}
+					Some(Ok("image/jp2"))=>{
+						let img=jpeg2k::Image::from_bytes(&self.src_bytes).map(|img|DynamicImage::try_from(&img));
+						let img=img.map(|r|r.map_err(|e|e.to_string())).map_err(|e|e.to_string()).unwrap_or_else(|e|Err(e));
+						let img=match img{
+							Ok(img) => img,
+							Err(e) => {
+								self.headers.append("X-Proxy-Error",format!("Jpeg2000 Error:{:?}",e).parse().unwrap());
+								return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+							},
+						};
+						return self.response_img(img);
+					},
+					_=>{
+						self.headers.append("X-Proxy-Error",format!("CodecError:{:?}",e).parse().unwrap());
+						return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+					}
 				}
-				self.headers.append("X-Proxy-Error",format!("CodecError:{:?}",e).parse().unwrap());
-				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			},
 		};
 		match codec{
