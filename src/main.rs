@@ -322,7 +322,7 @@ impl RequestContext{
 	}
 }
 impl RequestContext{
-	async fn encode(&mut self,resp: reqwest::Response,is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+	async fn encode(&mut self,resp: reqwest::Response,mut is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 		let mut is_svg=false;
 		let mut content_type=None;
 		if let Some(media)=self.headers.get("Content-Type"){
@@ -347,6 +347,11 @@ impl RequestContext{
 							"image/x-targa"|"image/x-tga"=>self.codec=Ok(image::ImageFormat::Tga),
 							_=>{}
 						}
+					}
+					if head.starts_with(&[0xFF,0x0A])||head.starts_with(&[0x00,0x00,0x00,0x0C,0x4A,0x58,0x4C,0x20,0x0D,0x0A,0x87,0x0A]){
+						is_img=true;
+						self.headers.remove("Content-Type");
+						self.headers.append("Content-Type", "image/jxl".parse().unwrap());
 					}
 				}
 			}
