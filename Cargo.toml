@@ -26,6 +26,7 @@ rexif = "0.7"
 avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
 chrono = "0.4"
 fast_image_resize = "3.0"
+jxl-oxide =  {version="0.11.0",features = [ "image","lcms2" ] }
 
 [profile.release]
 strip = true

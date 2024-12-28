@@ -66,6 +66,11 @@ impl RequestContext{
 		let codec=match &self.codec{
 			Ok(codec) => codec,
 			Err(e) => {
+				if self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes()))==Some(Ok("image/jxl")){
+					let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes)).expect("cannot decode image");
+					let img = DynamicImage::from_decoder(decoder).expect("cannot decode image");
+					return self.response_img(img);
+				}
 				self.headers.append("X-Proxy-Error",format!("CodecError:{:?}",e).parse().unwrap());
 				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			},
