@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-image = { path = "../image-rs" , features = ["avif-native"] }
+image = { version = "*" , features = ["avif-native"] }
 
 [target.'cfg(any(target_arch = "x86",target_arch = "x86_64"))'.dependencies.image]
-path = "../image-rs"
+version = "*"
 default-features = false
 features = ["nasm"]
