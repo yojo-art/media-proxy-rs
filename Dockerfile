@@ -32,7 +32,6 @@ ARG GID="852"
 RUN addgroup -g "${GID}" proxy && adduser -u "${UID}" -G proxy -D -h /media-proxy-rs -s /bin/sh proxy
 WORKDIR /media-proxy-rs
 USER proxy
-COPY asset ./asset
 COPY --from=1 /app/media-proxy-rs ./media-proxy-rs
 COPY --from=1 /app/healthcheck ./healthcheck
 RUN sh -c "./media-proxy-rs&" && ./healthcheck 12887 http://127.0.0.1:12766/test.webp
