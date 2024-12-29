@@ -5,7 +5,7 @@
 
 ## 実行(Docker)
 ```
-docker run -itd ghcr.io/yojo-art/media-proxy-rs:main
+docker run -itd -p 12766:12766 ghcr.io/yojo-art/media-proxy-rs:main
 ```
 
 ## 実行(Linux)
