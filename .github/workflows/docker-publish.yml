@@ -94,12 +94,22 @@ jobs:
       # https://github.com/docker/build-push-action
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Build and export to Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: ${{ github.repository }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
@@ -115,6 +125,64 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
+
+      - name: Extract Application
+        run: |
+          mkdir /tmp/app/
+          chmod o+rwx /tmp/app/
+          docker run --rm -t -v /tmp/app:/tmp/app ${{ github.repository }}:latest cp /media-proxy-rs/media-proxy-rs /tmp/app/
+
+      - name: Upload Application
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-proxy-rs_${{ env.PLATFORM_PAIR }}
+          path: /tmp/app/media-proxy-rs
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' }}
+    permissions:
+      contents: write
+      id-token: write
+    needs:
+      - build
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/386
+          - linux/amd64
+          - linux/arm64
+          - linux/arm/v6
+          - linux/arm/v7
+    steps:
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      - name: Download Application
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/app
+          pattern: media-proxy-rs_${{ env.PLATFORM_PAIR }}
+          merge-multiple: true
+      - name: gzip Application
+        working-directory: /tmp/app
+        run: |
+          gzip -k media-proxy-rs
+      - name: Upload release
+        uses: WebFreak001/deploy-nightly@v3.2.0
+        with:
+          upload_url: https://uploads.github.com/repos/${{ github.repository }}/releases/98575220/assets{?name,label} # find out this value by opening https://api.github.com/repos/<owner>/<repo>/releases in your browser and copy the full "upload_url" value including the {?name,label} part
+          release_id: 98575220 # same as above (id can just be taken out the upload_url, it's used to find old releases)
+          asset_path: /tmp/app/media-proxy-rs.gz # path to archive to upload
+          asset_name: media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz # name to upload the release as, use $$ to insert date (YYYYMMDD) and 6 letter commit hash
+          asset_content_type: application/gzip # required by GitHub API
+          max_releases: 7 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
+          ignore_hash: true
+
   merge:
     runs-on: ubuntu-latest
     if: ${{ github.event_name != 'pull_request' }}
