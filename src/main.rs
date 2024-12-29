@@ -1,5 +1,5 @@
 use core::str;
-use std::{io::{Read, Write}, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
+use std::{io::Write, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
 use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
@@ -122,9 +122,7 @@ fn main() {
 	}
 	let config:ConfigFile=serde_json::from_reader(std::fs::File::open(&config_path).unwrap()).unwrap();
 
-	let mut dummy_png=vec![];
-	std::fs::File::open("asset/dummy.png").expect("not found dummy.png").read_to_end(&mut dummy_png).expect("load error dummy.png");
-	let dummy_png=Arc::new(dummy_png);
+	let dummy_png=Arc::new(include_bytes!("../asset/dummy.png").to_vec());
 	let config=Arc::new(config);
 	let rt=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 	let client=reqwest::ClientBuilder::new();
@@ -137,7 +135,10 @@ fn main() {
 	if config.load_system_fonts{
 		fontdb.load_system_fonts();
 	}
-	fontdb.load_fonts_dir("asset/font/");
+	if std::path::Path::new("asset/font/").exists(){
+		fontdb.load_fonts_dir("asset/font/");
+	}
+	fontdb.load_font_source(resvg::usvg::fontdb::Source::Binary(Arc::new(include_bytes!("../asset/font/Aileron-Light.otf"))));
 	let fontdb=Arc::new(fontdb);
 	let arg_tup=(client,config,dummy_png,fontdb);
 	rt.block_on(async{

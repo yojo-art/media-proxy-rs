@@ -1,4 +1,4 @@
-use std::{io::Read, net::SocketAddr, str::FromStr};
+use std::{net::SocketAddr, str::FromStr};
 
 use axum::{response::IntoResponse, Router};
 
@@ -12,9 +12,7 @@ fn main() {
 	rt.spawn(async move{
 		let app = Router::new();
 		let app=app.route("/dummy.png",axum::routing::get(||async{
-			let mut dummy_png=vec![];
-			std::fs::File::open("asset/dummy.png").expect("not found dummy.png").read_to_end(&mut dummy_png).expect("load error dummy.png");
-			(axum::http::StatusCode::OK,dummy_png).into_response()
+			(axum::http::StatusCode::OK,include_bytes!("../asset/dummy.png").to_vec()).into_response()
 		}));
 		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 	});
