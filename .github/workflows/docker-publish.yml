@@ -175,8 +175,8 @@ jobs:
       - name: Upload release
         uses: WebFreak001/deploy-nightly@v3.2.0
         with:
-          upload_url: https://uploads.github.com/repos/${{ github.repository }}/releases/98575220/assets{?name,label} # find out this value by opening https://api.github.com/repos/<owner>/<repo>/releases in your browser and copy the full "upload_url" value including the {?name,label} part
-          release_id: 98575220 # same as above (id can just be taken out the upload_url, it's used to find old releases)
+          upload_url: https://uploads.github.com/repos/${{ github.repository }}/releases/192617419/assets{?name,label} # find out this value by opening https://api.github.com/repos/<owner>/<repo>/releases in your browser and copy the full "upload_url" value including the {?name,label} part
+          release_id: 192617419 # same as above (id can just be taken out the upload_url, it's used to find old releases)
           asset_path: /tmp/app/media-proxy-rs.gz # path to archive to upload
           asset_name: media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz # name to upload the release as, use $$ to insert date (YYYYMMDD) and 6 letter commit hash
           asset_content_type: application/gzip # required by GitHub API
