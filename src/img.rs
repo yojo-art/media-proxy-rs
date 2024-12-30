@@ -91,6 +91,35 @@ impl RequestContext{
 						};
 						return self.response_img(img);
 					},
+					Some(Ok("image/jxr"))=>{
+						fn decode_jxr(src_bytes:&[u8])->Result<Result<DynamicImage,String>, jpegxr::JXRError>{
+							use jpegxr::{ImageDecode, PixelInfo};
+							let mut decoder = ImageDecode::with_reader(std::io::Cursor::new(src_bytes))?;
+							let (width, height) = decoder.get_size()?;
+							let info = PixelInfo::from_format(decoder.get_pixel_format()?);
+							let stride = width as usize * info.bits_per_pixel() as usize/8;
+							let size = stride * height as usize;
+							let mut buffer = Vec::<u8>::with_capacity(size);
+							buffer.resize(size, 0);
+							decoder.alpha_mode(info.has_alpha());
+							decoder.copy_all(&mut buffer, stride)?;
+							let img=jpegxr_img(width as u32,height as u32,stride,buffer,info.format());
+							Ok(img.ok_or_else(||format!("color_format={:?}&bgr={}&channels={}&format={:?}",info.color_format(),info.bgr(),info.channels(),info.format())))
+						}
+						match decode_jxr(&self.src_bytes){
+							Ok(Ok(img))=>{
+								return self.response_img(img);
+							},
+							Ok(Err(e))=>{
+								self.headers.append("X-Proxy-Error",format!("JpegXR decode pixels {:?}",e).parse().unwrap());
+								return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+							}
+							Err(e)=>{
+								self.headers.append("X-Proxy-Error",format!("JpegXR decode bytes {:?}",e).parse().unwrap());
+								return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+							}
+						}
+					}
 					_=>{
 						self.headers.append("X-Proxy-Error",format!("CodecError:{:?}",e).parse().unwrap());
 						return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
@@ -324,6 +353,67 @@ impl RequestContext{
 			}
 		}
 		img
+	}
+}
+
+fn jpegxr_img(width:u32,height:u32,stride:usize,buffer:Vec<u8>,info:jpegxr::PixelFormat)->Option<DynamicImage>{
+	match info{
+		jpegxr::PixelFormat::PixelFormat8bppGray => {
+			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageLuma8(i))
+		},
+		jpegxr::PixelFormat::PixelFormat24bppBGR => {
+			let mut buffer=buffer;
+			for y in 0..height{
+				for x in 0..width{
+					let offset=y as usize*stride+x as usize*3;
+					let r=buffer[offset];
+					buffer[y as usize*stride+x as usize*4]=buffer[offset+2];
+					buffer[offset+2]=r;
+				}
+			}
+			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageRgb8(i))
+		},
+		jpegxr::PixelFormat::PixelFormat24bppRGB => {
+			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageRgb8(i))
+		},
+		jpegxr::PixelFormat::PixelFormat32bppBGR => {
+			let mut raw_img=Vec::with_capacity(height as usize*3);
+			for y in 0..height{
+				for x in 0..width{
+					raw_img.push(buffer[y as usize*stride+x as usize*4+2]);
+					raw_img.push(buffer[y as usize*stride+x as usize*4+1]);
+					raw_img.push(buffer[y as usize*stride+x as usize*4+0]);
+				}
+			}
+			image::ImageBuffer::from_raw(width,height,raw_img).map(|i|DynamicImage::ImageRgb8(i))
+		},
+		jpegxr::PixelFormat::PixelFormat32bppBGRA => {
+			let mut buffer=buffer;
+			for y in 0..height{
+				for x in 0..width{
+					let offset=y as usize*stride+x as usize*4;
+					let r=buffer[offset];
+					buffer[y as usize*stride+x as usize*4]=buffer[offset+2];
+					buffer[offset+2]=r;
+				}
+			}
+			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageRgba8(i))
+		},
+		jpegxr::PixelFormat::PixelFormat32bppRGB => {
+			let mut raw_img=Vec::with_capacity(height as usize*3);
+			for y in 0..height{
+				for x in 0..width{
+					raw_img.push(buffer[y as usize*stride+x as usize*4+0]);
+					raw_img.push(buffer[y as usize*stride+x as usize*4+1]);
+					raw_img.push(buffer[y as usize*stride+x as usize*4+2]);
+				}
+			}
+			image::ImageBuffer::from_raw(width,height,raw_img).map(|i|DynamicImage::ImageRgb8(i))
+		},
+		jpegxr::PixelFormat::PixelFormat32bppRGBA => {
+			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageRgba8(i))
+		},
+		_ => None,
 	}
 }
 

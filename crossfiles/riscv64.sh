@@ -6,3 +6,4 @@ export AR=riscv64-linux-musl-ar
 export RUSTFLAGS="-C linker=${CC} "
 export PKG_CONFIG_SYSROOT_DIR="/musl/${MUSL_NAME}/"
 export RUST_TARGET="riscv64gc-unknown-linux-musl"
+export BINDGEN_EXTRA_CLANG_ARGS="--sysroot ${PKG_CONFIG_SYSROOT_DIR}/riscv64-linux-musl"

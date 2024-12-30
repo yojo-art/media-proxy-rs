@@ -359,6 +359,11 @@ impl RequestContext{
 						self.headers.remove("Content-Type");
 						self.headers.append("Content-Type", "image/jp2".parse().unwrap());
 					}
+					if head.starts_with(&[0x49,0x49,0xBC]){
+						is_img=true;
+						self.headers.remove("Content-Type");
+						self.headers.append("Content-Type", "image/jxr".parse().unwrap());
+					}
 				}
 			}
 		}

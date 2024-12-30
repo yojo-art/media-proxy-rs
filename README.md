@@ -69,3 +69,4 @@ Dockerを使用する場合はbuildxとqemuによるクロスコンパイルが�
 - WebP
 - JPEG XL(jxl-oxide)
 - JPEG 2000(openjp2)
+- JPEG XR(jxrlib)

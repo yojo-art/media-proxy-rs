@@ -28,6 +28,7 @@ chrono = "0.4"
 fast_image_resize = "3.0"
 jxl-oxide =  {version="0.11.0",features = [ "image","lcms2" ] }
 jpeg2k = { version = "0.9.1", default-features = false , features = ["image","openjp2"] }
+jpegxr = { git="https://github.com/kozakura913/jpegxr" }
 
 [profile.release]
 strip = true
