@@ -259,65 +259,38 @@ struct RequestContext{
 }
 impl RequestContext{
 	pub fn disposition_ext(headers:&mut HeaderMap,ext:&str){
-		Self::rename_disposition(headers,|s|{
-			let mut last_dot=s.len()-1;
-			let mut index=0;
-			for c in s.chars(){
-				if c=='.'{
-					last_dot=index;
-				}
-				index+=1;
-			}
-			format!("{}{}",&s[0..last_dot as usize],ext)
-		})
-	}
-	pub fn rename_disposition(headers:&mut HeaderMap,mut f:impl FnMut(&str)->String){
 		let k="Content-Disposition";
 		if let Some(cd)=headers.get(k){
 			let s=std::str::from_utf8(cd.as_bytes());
 			if let Ok(s)=s{
-				let mut res=String::new();
-				for e in s.split("; "){
-					if e.starts_with("filename"){
-						let mut index=0;
-						for e in e.split("="){
-							//明示文字コード指定があるか
-							let mut is_charset=false;
-							if index==0{
-								res.push_str(e);
-								res.push_str("=");
-								if e.ends_with("*"){
-									is_charset=true;
-								}
-							}
-							if index==1{
-								if is_charset{
-									if let Some(i)=e.find("\""){
-										res.push_str(&format!("{}\"{}",&e[0..i],f(&e[i..]).as_str()));
-									}
-								}else if e.starts_with("\"")&&e.ends_with("\""){
-									let e=&e[1..e.len()-1];
-									if !e.is_empty(){
-										res.push_str(&format!("\"{}\"",f(e).as_str()));
-									}
-								}else{
-									if !e.is_empty(){
-										res.push_str(f(e).as_str());
-									}
-								}
-							}
-							index+=1;
-						}
-						if index==1{
-							res.push_str(f("null").as_str());
-						}
-					}else{
-						res.push_str(e);
+				let cd=mailparse::parse_content_disposition(s);
+				let cd_utf8=cd.params.get("filename*");
+				let mut name=None;
+				if let Some(cd_utf8)=cd_utf8{
+					let cd_utf8=cd_utf8.to_uppercase();
+					if cd_utf8.starts_with("UTF-8''")&&cd_utf8.len()>7{
+						name=urlencoding::decode(&cd_utf8[7..]).map(|s|s.to_string()).ok();
 					}
-					res.push_str("; ");
 				}
+				if name.is_none(){
+					if let Some(filename)=cd.params.get("filename"){
+						let m_filename=format!("_:{}",filename);
+						let parsed=mailparse::parse_header(&m_filename.as_bytes());
+						if let Ok((parsed,_))=&parsed{
+							name=Some(parsed.get_value());
+						}else if cd.params.get("name").is_none(){
+							name=Some(filename.clone());
+						}
+					}
+				}
+				let name=name.unwrap_or_else(||cd.params.get("name").map(|s|s.clone()).unwrap_or_else(||"null".to_owned()));
+				let mut name_arr:Vec<&str>=name.split('.').collect();
+				name_arr.pop();
+				let name=name_arr.join(".")+ext;
+				let name=urlencoding::encode(&name);
+				let content_disposition=format!("inline; filename=\"{}\";filename*=UTF-8''{};",name,name);
 				headers.remove(k);
-				headers.append(k,res.parse().unwrap());
+				headers.append(k,content_disposition.parse().unwrap());
 			}
 		}
 	}
