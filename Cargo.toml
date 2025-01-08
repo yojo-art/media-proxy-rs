@@ -20,7 +20,8 @@ serde = {version="^1.0.164",features=["derive"]}
 serde_json ="1"
 reqwest = { version = "0.11", default-features = false , features = ["stream","rustls-tls-webpki-roots"] }
 image = "^0.25.5"
-webp = { version = "0.3.0", default-features = false }
+#webp = { version = "0.3.0", default-features = false }
+webp = { git="https://github.com/kozakura913/webp-rs.git" ,branch = "feat/memory-reduce", default-features = false }
 resvg = {version="0.41",features = [ "text","memmap-fonts","raster-images" ] }
 rexif = "0.7"
 avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
