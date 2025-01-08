@@ -196,8 +196,10 @@ impl RequestContext{
 	}
 	fn encode_anim(&self,frames:image::Frames)->axum::response::Response{
 		let conf=webp::WebPConfig::new().unwrap();
-		let mut image_buffer=vec![];
 		let mut size:Option<(u32, u32)>=None;
+		let mut encoder=None;
+		let mut available_frames=0;
+		let mut err=None;
 		{
 			let mut timestamp=0;
 			const FRAMES_LIMIT:u32=1000;
@@ -224,35 +226,42 @@ impl RequestContext{
 						}
 					}else{
 						size=Some((img.width(),img.height()));
+						encoder=Some(webp::AnimEncoder::new(img.width(),img.height(),&conf));
 					}
-					image_buffer.push((img,timestamp));
+					let aframe=image_to_frame(&img,timestamp);
+					if let Ok(aframe)=aframe{
+						let res=encoder.as_mut().unwrap().add_frame(aframe);
+						if let Err(e)=res{
+							err=Some(e);
+						}else{
+							available_frames+=1;
+						}
+					}
 				}else{
 					break;
 				}
 			}
 		}
 		let mut headers=self.headers.clone();
-		if size.is_none(){
+		if size.is_none()||encoder.is_none(){
 			headers.append("X-Proxy-Error","NoAvailableFrames0".parse().unwrap());
 			return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
 		};
-		let size=size.unwrap();
-		let mut encoder=webp::AnimEncoder::new(size.0,size.1,&conf);
-		for (img,timestamp) in &image_buffer{
-			let aframe=image_to_frame(img,*timestamp);
-			if let Ok(aframe)=aframe{
-				encoder.add_frame(aframe);
-			}
-		}
-		if image_buffer.is_empty(){
+		if available_frames==0||encoder.is_none(){
 			headers.append("X-Proxy-Error","NoAvailableFrames".parse().unwrap());
 			return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
 		};
-		let buf=encoder.encode();
+		let buf=encoder.unwrap().encode();
 		headers.remove("Content-Type");
 		headers.append("Content-Type","image/webp".parse().unwrap());
 		headers.remove("Cache-Control");
-		headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+		if let Some(e)=err{
+			if let Ok(value)=format!("{:?}",e).parse(){
+				headers.append("X-Proxy-Error",value);
+			}
+		}else{
+			headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
+		}
 		Self::disposition_ext(&mut headers,".webp");
 		(axum::http::StatusCode::OK,headers,buf.to_vec()).into_response()
 	}
