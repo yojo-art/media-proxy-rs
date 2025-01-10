@@ -12,7 +12,7 @@ docker run -itd -p 12766:12766 ghcr.io/yojo-art/media-proxy-rs:main
 例(x86_64/amd64)
 ```
 curl -L https://github.com/yojo-art/media-proxy-rs/releases/download/nightly/media-proxy-rs_linux-amd64.gz | gzip -d > ./media-proxy-rs
-chmod+x ./media-proxy-rs
+chmod u+x ./media-proxy-rs
 ./media-proxy-rs
 ```
 利用するプラットフォームに応じて適切なバイナリを選択してください。ファイル名のリストを示します
@@ -22,6 +22,7 @@ media-proxy-rs_linux-amd64.gz
 media-proxy-rs_linux-arm-v6.gz
 media-proxy-rs_linux-arm-v7.gz
 media-proxy-rs_linux-arm64.gz
+media-proxy-rs_linux-riscv64.gz
 ```
 
 ## 設定ファイル
@@ -35,7 +36,7 @@ media-proxy-rs_linux-arm64.gz
 - [x] armv7-unknown-linux-musleabihf
 - [x] arm-unknown-linux-musleabihf
 - [x] i686-unknown-linux-musl
-- [ ] riscv64gc-unknown-linux-musl
+- [x] riscv64gc-unknown-linux-musl
 
 ## ビルド(x64/aarch64 Docker)
 Dockerを使用する場合はbuildxとqemuによるクロスコンパイルが利用できます  
