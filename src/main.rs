@@ -296,7 +296,7 @@ impl RequestContext{
 	}
 }
 impl RequestContext{
-	async fn encode(&mut self,resp: reqwest::Response,mut is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+	async fn encode(mut self,resp: reqwest::Response,mut is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
 		let mut is_svg=false;
 		let mut content_type=None;
 		if let Some(media)=self.headers.get("Content-Type"){
@@ -357,14 +357,32 @@ impl RequestContext{
 			self.headers.remove("Content-Range");
 			self.headers.remove("Accept-Ranges");
 			self.load_all(resp).await?;
-			let resp=self.encode_img();
-			if self.parms.fallback.is_some(){
+			let dummy_img=self.dummy_img.clone();
+			let is_fallback=self.parms.fallback.is_some();
+			let mut header=self.headers.clone();
+			let mut handle=self;
+			let resp=if let Ok(resp)=tokio::runtime::Handle::current().spawn_blocking(move ||{
+				let resp=handle.encode_img();
+				resp
+			}).await{
+				resp
+			}else{
+				header.append("X-Proxy-Error",format!("ImageEncodeThread").parse().unwrap());
+				return Err(if is_fallback{
+					header.remove("Content-Type");
+					header.append("Content-Type","image/png".parse().unwrap());
+					(axum::http::StatusCode::OK,header,(*dummy_img).clone()).into_response()
+				}else{
+					(axum::http::StatusCode::INTERNAL_SERVER_ERROR,header).into_response()
+				});
+			};
+			if is_fallback{
 				return Err(if resp.status()==axum::http::StatusCode::OK{
 					resp
 				}else{
-					self.headers.remove("Content-Type");
-					self.headers.append("Content-Type","image/png".parse().unwrap());
-					(axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response()
+					header.remove("Content-Type");
+					header.append("Content-Type","image/png".parse().unwrap());
+					(axum::http::StatusCode::OK,header,(*dummy_img).clone()).into_response()
 				});
 			}
 			return Err(resp);
