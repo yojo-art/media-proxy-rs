@@ -1,4 +1,4 @@
-FROM alpine:latest AS c_build_env
+FROM public.ecr.aws/docker/library/alpine:latest AS c_build_env
 RUN apk add --no-cache make clang musl-dev meson ninja pkgconfig nasm git
 
 FROM c_build_env AS dav1d
@@ -14,7 +14,7 @@ RUN cd /lcms2_src && ./configure
 RUN cd /lcms2_src && make
 RUN cd /lcms2_src && make DESTDIR=/lcms2 install
 
-FROM --platform=$BUILDPLATFORM rust AS build_app
+FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/rust:latest AS build_app
 ARG BUILDARCH
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -38,7 +38,7 @@ COPY asset ./asset
 COPY examples ./examples
 RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/app/target bash /app/crossfiles/build.sh
 
-FROM alpine:latest
+FROM public.ecr.aws/docker/library/alpine:latest
 ARG UID="852"
 ARG GID="852"
 RUN addgroup -g "${GID}" proxy && adduser -u "${UID}" -G proxy -D -h /media-proxy-rs -s /bin/sh proxy
