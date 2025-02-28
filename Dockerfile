@@ -2,7 +2,7 @@ FROM public.ecr.aws/docker/library/alpine:latest AS c_build_env
 RUN apk add --no-cache make clang musl-dev meson ninja pkgconfig nasm git
 
 FROM c_build_env AS dav1d
-RUN git clone --branch 1.3.0 --depth 1 https://code.videolan.org/videolan/dav1d.git /dav1d_src
+RUN git clone --branch 1.3.0 --depth 1 https://github.com/videolan/dav1d.git /dav1d_src
 RUN cd /dav1d_src && meson build -Dprefix=/dav1d -Denable_tools=false -Denable_examples=false -Ddefault_library=static --buildtype release
 RUN cd /dav1d_src && ninja -C build
 RUN cd /dav1d_src && ninja -C build install
