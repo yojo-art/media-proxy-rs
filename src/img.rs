@@ -449,22 +449,15 @@ fn resize(img:DynamicImage,max_width:u32,max_height:u32,filter:fast_image_resize
 	let scale = f32::min(max_width as f32 / img.width() as f32,max_height as f32 / img.height() as f32);
 	let dst_width=1.max((img.width() as f32 * scale).round() as u32);
 	let dst_height=1.max((img.height() as f32 * scale).round() as u32);
-	use std::num::NonZeroU32;
-	let width=NonZeroU32::new(img.width())?;
-	let height=NonZeroU32::new(img.height())?;
-	let src_image=fast_image_resize::Image::from_vec_u8(width,height,img.into_rgba8().into_raw(),fast_image_resize::PixelType::U8x4);
-	let mut src_image=src_image.ok()?;
-	let alpha_mul_div=fast_image_resize::MulDiv::default();
-	alpha_mul_div.multiply_alpha_inplace(&mut src_image.view_mut()).ok()?;
-	let dst_width=NonZeroU32::new(dst_width)?;
-	let dst_height=NonZeroU32::new(dst_height)?;
-	let mut dst_image = fast_image_resize::Image::new(dst_width,dst_height,src_image.pixel_type());
-	let mut dst_view = dst_image.view_mut();
-	let mut resizer = fast_image_resize::Resizer::new(
-		fast_image_resize::ResizeAlg::Convolution(filter),
-	);
-	resizer.resize(&src_image.view(), &mut dst_view).ok()?;
-	alpha_mul_div.divide_alpha_inplace(&mut dst_view).ok()?;
-	let rgba=image::RgbaImage::from_raw(dst_image.width().get(),dst_image.height().get(),dst_image.into_vec());
+	let src_image=fast_image_resize::images::Image::from_vec_u8(img.width(),img.height(),img.into_rgba8().into_raw(),fast_image_resize::PixelType::U8x4);
+	let src_image=src_image.ok()?;
+	let mut dst_image = fast_image_resize::images::Image::new(dst_width,dst_height,src_image.pixel_type());
+	let mut resizer = fast_image_resize::Resizer::new();
+	let options=fast_image_resize::ResizeOptions{
+		algorithm:fast_image_resize::ResizeAlg::Convolution(filter),
+		..Default::default()
+	};
+	resizer.resize(&src_image, &mut dst_image, &options).unwrap();
+	let rgba=image::RgbaImage::from_raw(dst_image.width(),dst_image.height(),dst_image.into_vec());
 	Some(DynamicImage::ImageRgba8(rgba?))
 }
