@@ -38,11 +38,14 @@ media-proxy-rs_linux-riscv64.gz
 - [x] i686-unknown-linux-musl
 - [x] riscv64gc-unknown-linux-musl
 
-## ビルド(x64/aarch64 Docker)
+## ビルド(x64 Docker)
 Dockerを使用する場合はbuildxとqemuによるクロスコンパイルが利用できます  
 ビルド対象プラットフォームはtarget supportの項目を参照してください
 1. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
 2. `docker build -t media-proxy-rs .`
+
+## ビルド(Docker aarch64等その他)
+./crosstiles/arm64.shのMUSL_NAMEと./crossfiles/deps.shのmuslをダウンロードする処理を調整する必要があります
 
 ## プラットフォーム最適化
 amd64ではデフォルトでx86-64-v3向けにビルドしますが、x86-64-v3未満の環境やx86-64-v4向け最適化利用したい場合./crosstiles/amd64.shのRUSTFLAGSを編集してください
