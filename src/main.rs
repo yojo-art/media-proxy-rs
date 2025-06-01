@@ -1,7 +1,7 @@
 use core::str;
 use std::{io::Write, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
-use axum::{body::StreamBody, http::HeaderMap, response::IntoResponse, Router};
+use axum::{http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
@@ -143,11 +143,12 @@ fn main() {
 	let arg_tup=(client,config,dummy_png,fontdb);
 	rt.block_on(async{
 		let http_addr:SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
+		let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
 		let app = Router::new();
 		let arg_tup0=arg_tup.clone();
 		let app=app.route("/",axum::routing::get(move|headers,parms|get_file(None,headers,arg_tup0.clone(),parms)));
-		let app=app.route("/*path",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
-		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await.unwrap();
+		let app=app.route("/{*path}",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
+		axum::serve(listener,app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await.unwrap();
 	});
 }
 
@@ -156,7 +157,7 @@ async fn get_file(
 	client_headers:axum::http::HeaderMap,
 	(client,config,dummy_img,fontdb):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>,Arc<resvg::usvg::fontdb::Database>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
-)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+)->Result<(axum::http::StatusCode,HeaderMap,axum::body::Body),axum::response::Response>{
 	println!("{}\t{}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
 		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
 		q.url,
@@ -167,7 +168,7 @@ async fn get_file(
 		q.r#static,
 		q.fallback,
 	);
-	let mut headers=axum::headers::HeaderMap::new();
+	let mut headers=HeaderMap::new();
 	if let Ok(url)=q.url.parse(){
 		headers.append("X-Remote-Url",url);
 	}
@@ -192,7 +193,7 @@ async fn get_file(
 			return Err((axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response())
 		}
 	};
-	fn add_remote_header(key:&'static str,headers:&mut axum::headers::HeaderMap,remote_headers:&reqwest::header::HeaderMap){
+	fn add_remote_header(key:&'static str,headers:&mut HeaderMap,remote_headers:&reqwest::header::HeaderMap){
 		for v in remote_headers.get_all(key){
 			headers.append(key,String::from_utf8_lossy(v.as_bytes()).parse().unwrap());
 		}
@@ -229,7 +230,7 @@ async fn get_file(
 			if idx+1>=line.len(){
 				continue;
 			}
-			if let Ok(k)=axum::headers::HeaderName::from_str(&line[0..idx]){
+			if let Ok(k)=axum::http::HeaderName::from_str(&line[0..idx]){
 				if let Ok(v)=line[idx+1..].parse(){
 					headers.append(k,v);
 				}
@@ -296,7 +297,7 @@ impl RequestContext{
 	}
 }
 impl RequestContext{
-	async fn encode(mut self,resp: reqwest::Response,mut is_img:bool)->Result<(axum::http::StatusCode,axum::headers::HeaderMap,StreamBody<impl futures::Stream<Item = Result<axum::body::Bytes, reqwest::Error>>>),axum::response::Response>{
+	async fn encode(mut self,resp: reqwest::Response,mut is_img:bool)->Result<(axum::http::StatusCode,HeaderMap,axum::body::Body),axum::response::Response>{
 		let mut is_svg=false;
 		let mut content_type=None;
 		if let Some(media)=self.headers.get("Content-Type"){
@@ -342,7 +343,7 @@ impl RequestContext{
 		}
 		if is_svg{
 			self.load_all(resp).await?;
-			if let Ok(img)=self.encode_svg(&self.fontdb){
+			if let Ok(img)=self.encode_svg(self.fontdb.clone()){
 				self.headers.remove("Content-Length");
 				self.headers.remove("Content-Range");
 				self.headers.remove("Accept-Ranges");
@@ -397,7 +398,7 @@ impl RequestContext{
 				Self::disposition_ext(&mut self.headers,".unknown");
 			}
 		}
-		let body=StreamBody::new(resp);
+		let body=axum::body::Body::from_stream(resp);
 		if status.is_success(){
 			self.headers.remove("Cache-Control");
 			self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());

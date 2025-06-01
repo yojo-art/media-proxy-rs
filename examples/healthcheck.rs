@@ -10,11 +10,12 @@ fn main() {
 	let self_url=reqwest::Url::from_str(&format!("http://{}:{}/dummy.png",http_addr.ip().to_string(),http_addr.port())).unwrap();
 	let rt=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 	rt.spawn(async move{
+		let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
 		let app = Router::new();
 		let app=app.route("/dummy.png",axum::routing::get(||async{
 			(axum::http::StatusCode::OK,include_bytes!("../asset/dummy.png").to_vec()).into_response()
 		}));
-		axum::Server::bind(&http_addr).serve(app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+		axum::serve(listener,app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 	});
 	let client=reqwest::Client::builder();
 	let client=client.timeout(std::time::Duration::from_millis(500));

@@ -1,11 +1,16 @@
+use std::sync::Arc;
+
 use image::{DynamicImage, ImageBuffer};
 use resvg::usvg;
 
 use crate::RequestContext;
 
 impl RequestContext{
-	pub(crate) fn encode_svg(&self,fontdb:&usvg::fontdb::Database)->Result<DynamicImage,()>{
-		let mut options=usvg::Options::default();
+	pub(crate) fn encode_svg(&self,fontdb:Arc<usvg::fontdb::Database>)->Result<DynamicImage,()>{
+		let mut options=usvg::Options{
+			fontdb:fontdb.clone(),
+			..Default::default()
+		};
 		for f in fontdb.faces(){
 			if let Some((name,_))=f.families.get(0){
 				//デフォルトフォントに存在する事が確実なフォントを使う
@@ -13,7 +18,7 @@ impl RequestContext{
 				break;
 			}
 		}
-		let tree=usvg::Tree::from_data(&self.src_bytes,&options,fontdb);
+		let tree=usvg::Tree::from_data(&self.src_bytes,&options);
 		let tree=match tree{
 			Ok(t)=>t,
 			Err(_)=>return Err(())
