@@ -32,6 +32,8 @@ jpeg2k = { version = "0.9.1", default-features = false , features = ["image","op
 jpegxr = { git="https://github.com/kozakura913/jpegxr" }
 urlencoding = "2.1.3"
 mailparse = "0.16.1"
+iprange = "0.6.7"
+ipnet = "*"
 
 [profile.release]
 strip = true

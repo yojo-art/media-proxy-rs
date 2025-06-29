@@ -261,7 +261,7 @@ jobs:
       - name: Run App
         run: |
           docker network create --driver bridge servers
-          docker run -d -p 12766:12766 --net=servers --platform ${{ matrix.platform }} ${{ github.repository }}:latest
+          docker run -d -p 12766:12766 --net=servers -e MEDIA_PROXY_ALLOWED_NETWORKS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 --platform ${{ matrix.platform }} ${{ github.repository }}:latest
           docker run -d -p 8080:80 --net=servers --name nginx -v ${{ runner.temp }}/http:/usr/share/nginx/html public.ecr.aws/nginx/nginx:stable-alpine
       - name: Curl Test
         run: |
