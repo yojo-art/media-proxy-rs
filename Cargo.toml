@@ -11,23 +11,23 @@ avif-decoder = ["dep:avif-decoder_dep"]
 [dependencies]
 tokio-stream = "*"
 axum = { version = "^0.8", features = ["http2"] }
-tokio = { version = "1.45", features = ["rt-multi-thread","signal"] }
-tokio-util = { version = "0.7.15", features = ["io"] }
+tokio = { version = "1.48", features = ["rt-multi-thread","signal"] }
+tokio-util = { version = "0.7.17", features = ["io"] }
 futures = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-headers = "^0.4.0"
-serde = {version="^1.0.219",features=["derive"]}
+headers = "^0.4.1"
+serde = {version="^1.0.228",features=["derive"]}
 serde_json ="1"
 reqwest = { version = "0.12", default-features = false , features = ["stream","rustls-tls-webpki-roots"] }
-image = "^0.25.6"
+image = "^0.25.9"
 #webp = { version = "0.3.0", default-features = false }
 webp = { git="https://github.com/kozakura913/webp-rs.git" ,branch = "feat/memory-reduce", default-features = false }
 resvg = {version="0.45",features = [ "text","memmap-fonts","raster-images" ] }
 rexif = "0.7"
 avif-decoder_dep = { path="./avif-decoder_dep" ,optional = true }
 chrono = "0.4"
-fast_image_resize = "5.1"
-jxl-oxide =  {version="0.12.2",features = [ "image","lcms2" ] }
+fast_image_resize = "5.4"
+jxl-oxide =  {version="0.12.5",features = [ "image","lcms2" ] }
 jpeg2k = { version = "0.9.1", default-features = false , features = ["image","openjp2"] }
 jpegxr = { git="https://github.com/kozakura913/jpegxr" }
 urlencoding = "2.1.3"
