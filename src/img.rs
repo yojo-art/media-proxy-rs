@@ -137,13 +137,19 @@ impl RequestContext{
 					return self.encode_single();
 				}
 				match a.apng(){
-					Ok(frames)=>self.encode_anim(frames.into_frames()),
+					Ok(frames)=>{
+						let loop_count=0;//TODO 現在ループ回数を取得するAPIが無いため無限ループ
+						self.encode_anim(frames.into_frames(),loop_count)
+					},
 					Err(_)=>self.encode_single()
 				}
 			},
 			image::ImageFormat::Gif => {
 				match image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&self.src_bytes)){
-					Ok(a)=>self.encode_anim(a.into_frames()),
+					Ok(a)=>{
+						let loop_count=0;//TODO 現在ループ回数を取得するAPIが無いため無限ループ
+						self.encode_anim(a.into_frames(),loop_count)
+					},
 					Err(_)=>self.encode_single()
 				}
 			},
@@ -181,9 +187,9 @@ impl RequestContext{
 							frames.push(Ok(frame));
 						}
 						let frames=image::Frames::new(Box::new(frames.into_iter()));
-						self.encode_anim(frames)
+						self.encode_anim(frames,dec.loop_count)
 					}else{
-						self.encode_anim(a.into_frames())
+						self.encode_anim(a.into_frames(),0)
 					}
 				}else{
 					self.encode_single()
@@ -194,7 +200,7 @@ impl RequestContext{
 			},
 		}
 	}
-	fn encode_anim(&self,frames:image::Frames)->axum::response::Response{
+	fn encode_anim(&self,frames:image::Frames,loop_count:u32)->axum::response::Response{
 		let conf=webp::WebPConfig::new().unwrap();
 		let mut size:Option<(u32, u32)>=None;
 		let mut encoder=None;
@@ -226,7 +232,11 @@ impl RequestContext{
 						}
 					}else{
 						size=Some((img.width(),img.height()));
-						encoder=Some(webp::AnimEncoder::new(img.width(),img.height(),&conf));
+						encoder=Some({
+							let mut encoder=webp::AnimEncoder::new(img.width(),img.height(),&conf);
+							encoder.set_loop_count(loop_count.try_into().unwrap_or_default());
+							encoder
+						});
 					}
 					let aframe=image_to_frame(&img,timestamp);
 					if let Ok(aframe)=aframe{
