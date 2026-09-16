@@ -156,7 +156,9 @@ fn main() {
 		Some(url)=>client.proxy(reqwest::Proxy::http(url).unwrap()),
 		None=>client,
 	};
-	let client=client.build().unwrap();
+	// Do NOT follow redirects automatically: each redirect target must pass
+	// check_url again (finding #2). Redirects are followed manually in get_file.
+	let client=client.redirect(reqwest::redirect::Policy::none()).build().unwrap();
 	let mut fontdb=resvg::usvg::fontdb::Database::new();
 	if config.load_system_fonts{
 		fontdb.load_system_fonts();
@@ -185,7 +187,17 @@ async fn check_url(config:&Arc<ConfigFile>,url:impl AsRef<str>)->Result<(),Strin
 	}
 	let host=u.host_str().ok_or_else(||"no host".to_owned())?;
 	if let Some(blocked_hosts)=&config.blocked_hosts{
-		if blocked_hosts.contains(&host.to_lowercase()){
+		let host_lower=host.to_lowercase();
+		// Suffix match so that blocking "example.com" also covers "evil.example.com".
+		// A leading-dot entry (".example.com") only matches subdomains, never the apex.
+		let blocked=blocked_hosts.iter().map(|h|h.to_lowercase()).any(|entry|{
+			if let Some(suffix)=entry.strip_prefix('.'){
+				host_lower.ends_with(&format!(".{}",suffix))
+			}else{
+				host_lower==entry||host_lower.ends_with(&format!(".{}",entry))
+			}
+		});
+		if blocked{
 			return Err("Blocked address".to_owned());
 		}
 	}
@@ -290,23 +302,62 @@ async fn get_file(
 	};
 
 	println!("check_url {}ms",(chrono::Utc::now()-time).num_milliseconds());
-	let req=client.get(&q.url);
-	let req=req.timeout(std::time::Duration::from_millis(config.timeout));
-	let req=req.header("User-Agent",config.user_agent.clone());
-	let req=if let Some(range)=client_headers.get("Range"){
-		req.header("Range",range.as_bytes())
-	}else{
-		req
-	};
-	let resp=match req.send().await{
-		Ok(resp) => resp,
-		Err(e) => {
-			if q.fallback.is_some(){
-				headers.append("Content-Type","image/png".parse().unwrap());
-				return Err((axum::http::StatusCode::OK,headers,(*dummy_img).clone()).into_response());
+	// NOTE: DNS rebinding (TOCTOU between check_url and connect) remains a residual
+	// risk: check_url and reqwest resolve the host independently. Redirects are at
+	// least re-validated hop by hop below; full pinning (resolve + connect to the
+	// validated IP, e.g. via ClientBuilder::resolve per request) is future work.
+	const MAX_REDIRECTS:u8=5;
+	let mut current_url=q.url.clone();
+	let mut redirects:u8=0;
+	let resp=loop{
+		let req=client.get(&current_url);
+		let req=req.timeout(std::time::Duration::from_millis(config.timeout));
+		let req=req.header("User-Agent",config.user_agent.clone());
+		let req=if let Some(range)=client_headers.get("Range"){
+			req.header("Range",range.as_bytes())
+		}else{
+			req
+		};
+		let resp=match req.send().await{
+			Ok(resp) => resp,
+			Err(e) => {
+				if q.fallback.is_some(){
+					headers.append("Content-Type","image/png".parse().unwrap());
+					return Err((axum::http::StatusCode::OK,headers,(*dummy_img).clone()).into_response());
+				}
+				return Err((axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response())
 			}
-			return Err((axum::http::StatusCode::BAD_REQUEST,headers,format!("{:?}",e)).into_response())
+		};
+		if !resp.status().is_redirection(){
+			break resp;
 		}
+		if redirects>=MAX_REDIRECTS{
+			headers.append("X-Proxy-Error","TooManyRedirects".parse().unwrap());
+			return Err((axum::http::StatusCode::BAD_GATEWAY,headers).into_response());
+		}
+		let location=resp.headers().get(axum::http::header::LOCATION).and_then(|v|v.to_str().ok().map(|s|s.to_owned()));
+		let Some(location)=location else{
+			break resp;
+		};
+		// Resolve relative Location headers against the current URL, then
+		// re-validate every hop with check_url (finding #2).
+		let base=reqwest::Url::from_str(&current_url).map_err(|e|{
+			(axum::http::StatusCode::BAD_REQUEST,headers.clone(),format!("{:?}",e)).into_response()
+		}).map_err(axum::response::Response::from)?;
+		let next=base.join(&location).map_err(|e|{
+			(axum::http::StatusCode::BAD_REQUEST,headers.clone(),format!("{:?}",e)).into_response()
+		}).map_err(axum::response::Response::from)?;
+		// Drain the redirect body so the connection can be reused.
+		let _=resp.bytes().await;
+		let next_str=next.to_string();
+		if let Err(s)=check_url(&config,&next_str).await{
+			if let Ok(v)=s.parse(){
+				headers.append("X-Proxy-Error",v);
+			}
+			return Err((axum::http::StatusCode::BAD_REQUEST,headers).into_response());
+		}
+		current_url=next_str;
+		redirects+=1;
 	};
 	fn add_remote_header(key:&'static str,headers:&mut HeaderMap,remote_headers:&reqwest::header::HeaderMap){
 		for v in remote_headers.get_all(key){
