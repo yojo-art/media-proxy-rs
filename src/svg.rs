@@ -34,9 +34,18 @@ impl RequestContext{
 		}else{
 			(size.width() as u32,size.height() as u32,1f32)
 		};
-		let tf=usvg::Transform::from_scale(scale,scale);
-		let mut rgba=vec![0;(width*height*4) as usize];
-		let mut pxmap=resvg::tiny_skia::PixmapMut::from_bytes(&mut rgba,width,height).unwrap();
+	let tf=usvg::Transform::from_scale(scale,scale);
+	// u32 arithmetic can overflow on crafted SVG sizes; never panic (finding #3).
+	// A pixel-budget gate is applied separately (finding #4).
+	let len=(width as u64).checked_mul(height as u64).and_then(|n|n.checked_mul(4));
+	let len=len.and_then(|n|usize::try_from(n).ok());
+	let Some(len)=len else{
+		return Err(());
+	};
+	let mut rgba=vec![0;len];
+	let Some(mut pxmap)=resvg::tiny_skia::PixmapMut::from_bytes(&mut rgba,width,height) else{
+		return Err(());
+	};
 		resvg::render(&tree,tf,&mut pxmap);
 		match ImageBuffer::from_vec(width,height,rgba){
 			Some(img)=>{

@@ -133,9 +133,9 @@ impl RequestContext{
 					Ok(a)=>a,
 					Err(_)=>return self.encode_single()
 				};
-				if !a.is_apng().unwrap(){
-					return self.encode_single();
-				}
+			if !a.is_apng().unwrap_or(false){
+				return self.encode_single();
+			}
 				match a.apng(){
 					Ok(frames)=>{
 						let loop_count=0;//TODO 現在ループ回数を取得するAPIが無いため無限ループ
@@ -164,18 +164,22 @@ impl RequestContext{
 						let mut offset=0;
 						let mut frames=vec![];
 						dec.sort_by_time_stamp();
-						for frame in dec.into_iter(){
-							let img=if frame.get_layout().is_alpha() {
-								let image =
-									image::ImageBuffer::from_raw(frame.width(), frame.height(), frame.get_image().to_owned())
-										.expect("ImageBuffer couldn't be created");
-								image
-							} else {
-								let image =
-									image::ImageBuffer::from_raw(frame.width(), frame.height(), frame.get_image().to_owned())
-										.expect("ImageBuffer couldn't be created");
-								DynamicImage::ImageRgb8(image).into_rgba8()
+					for frame in dec.into_iter(){
+						let img=if frame.get_layout().is_alpha() {
+							let Some(image)=
+								image::ImageBuffer::from_raw(frame.width(), frame.height(), frame.get_image().to_owned())
+							else{
+								continue;
 							};
+							image
+						} else {
+							let Some(image)=
+								image::ImageBuffer::from_raw(frame.width(), frame.height(), frame.get_image().to_owned())
+							else{
+								continue;
+							};
+							DynamicImage::ImageRgb8(image).into_rgba8()
+						};
 							let delay=frame.get_time_ms()-offset;
 							offset=frame.get_time_ms();
 							if delay<0{
@@ -238,15 +242,17 @@ impl RequestContext{
 							encoder
 						});
 					}
-					let aframe=image_to_frame(&img,timestamp);
-					if let Ok(aframe)=aframe{
-						let res=encoder.as_mut().unwrap().add_frame(aframe);
+				let aframe=image_to_frame(&img,timestamp);
+				if let Ok(aframe)=aframe{
+					if let Some(encoder)=encoder.as_mut(){
+						let res=encoder.add_frame(aframe);
 						if let Err(e)=res{
 							err=Some(e);
 						}else{
 							available_frames+=1;
 						}
 					}
+				}
 				}else{
 					break;
 				}
@@ -469,7 +475,9 @@ fn resize(img:DynamicImage,max_width:u32,max_height:u32,filter:fast_image_resize
 		algorithm:fast_image_resize::ResizeAlg::Convolution(filter),
 		..Default::default()
 	};
-	resizer.resize(&src_image, &mut dst_image, &options).unwrap();
+	if resizer.resize(&src_image, &mut dst_image, &options).is_err(){
+		return None;
+	}
 	let rgba=image::RgbaImage::from_raw(dst_image.width(),dst_image.height(),dst_image.into_vec());
 	Some(DynamicImage::ImageRgba8(rgba?))
 }

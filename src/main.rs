@@ -176,6 +176,9 @@ fn main() {
 		let arg_tup0=arg_tup.clone();
 		let app=app.route("/",axum::routing::get(move|headers,parms|get_file(None,headers,arg_tup0.clone(),parms)));
 		let app=app.route("/{*path}",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
+		// A single bad request must not kill the process (finding #3).
+		// With panic="abort" removed, this layer turns handler panics into 500s.
+		let app=app.layer(tower_http::catch_panic::CatchPanicLayer::new());
 		axum::serve(listener,app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await.unwrap();
 	});
 }
@@ -361,7 +364,12 @@ async fn get_file(
 	};
 	fn add_remote_header(key:&'static str,headers:&mut HeaderMap,remote_headers:&reqwest::header::HeaderMap){
 		for v in remote_headers.get_all(key){
-			headers.append(key,String::from_utf8_lossy(v.as_bytes()).parse().unwrap());
+			// Never unwrap on attacker-controlled bytes: from_bytes rejects
+			// CTLs/DEL and we must not panic (finding #3). Invalid values are
+			// dropped instead of aborting the whole process.
+			if let Ok(value)=reqwest::header::HeaderValue::from_bytes(v.as_bytes()){
+				headers.append(key,value);
+			}
 		}
 	}
 	let remote_headers=resp.headers();
@@ -454,10 +462,13 @@ impl RequestContext{
 				let mut name_arr:Vec<&str>=name.split('.').collect();
 				name_arr.pop();
 				let name=name_arr.join(".")+ext;
-				let name=urlencoding::encode(&name);
-				let content_disposition=format!("inline; filename=\"{}\";filename*=UTF-8''{};",name,name);
-				headers.remove(k);
-				headers.append(k,content_disposition.parse().unwrap());
+			let name=urlencoding::encode(&name);
+			let content_disposition=format!("inline; filename=\"{}\";filename*=UTF-8''{};",name,name);
+			headers.remove(k);
+			// Must not unwrap: a crafted remote filename must never panic (finding #3).
+			if let Ok(v)=content_disposition.parse(){
+				headers.append(k,v);
+			}
 			}
 		}
 	}
