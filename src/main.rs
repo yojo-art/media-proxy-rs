@@ -9,6 +9,7 @@ mod img;
 mod svg;
 mod browsersafe;
 mod image_test;
+mod ssrf;
 
 /// Bounds concurrent fetch+encode work so that per-request memory budgets
 /// (#4/#5) cannot be multiplied without limit (finding #6). Auth and
@@ -165,7 +166,12 @@ fn main() {
 	};
 	// Do NOT follow redirects automatically: each redirect target must pass
 	// check_url again (finding #2). Redirects are followed manually in get_file.
-	let client=client.redirect(reqwest::redirect::Policy::none()).build().unwrap();
+	let client=client.redirect(reqwest::redirect::Policy::none());
+	// Connect-time SSRF enforcement: validate the addresses the connection is
+	// actually opened to, closing the DNS-rebinding TOCTOU between check_url's
+	// lookup and the connect-time lookup (finding #2).
+	let client=client.dns_resolver(std::sync::Arc::new(crate::ssrf::ValidatingResolver::new(config.clone())));
+	let client=client.build().unwrap();
 	let mut fontdb=resvg::usvg::fontdb::Database::new();
 	if config.load_system_fonts{
 		fontdb.load_system_fonts();
@@ -196,87 +202,17 @@ async fn check_url(config:&Arc<ConfigFile>,url:impl AsRef<str>)->Result<(),Strin
 		scheme=>return Err(format!("scheme: {}",scheme))
 	}
 	let host=u.host_str().ok_or_else(||"no host".to_owned())?;
-	if let Some(blocked_hosts)=&config.blocked_hosts{
-		let host_lower=host.to_lowercase();
-		// Suffix match so that blocking "example.com" also covers "evil.example.com".
-		// A leading-dot entry (".example.com") only matches subdomains, never the apex.
-		let blocked=blocked_hosts.iter().map(|h|h.to_lowercase()).any(|entry|{
-			if let Some(suffix)=entry.strip_prefix('.'){
-				host_lower.ends_with(&format!(".{}",suffix))
-			}else{
-				host_lower==entry||host_lower.ends_with(&format!(".{}",entry))
-			}
-		});
-		if blocked{
-			return Err("Blocked address".to_owned());
-		}
+	// Fail fast with a clear error. The connect-time ValidatingResolver
+	// re-enforces the same policy on the addresses actually connected to,
+	// closing the DNS-rebinding TOCTOU (finding #2).
+	if crate::ssrf::is_host_blocked(config.blocked_hosts.as_ref(),host){
+		return Err("Blocked address".to_owned());
 	}
-	use std::net::SocketAddr;
-	use iprange::IpRange;
-	use ipnet::Ipv4Net;
 	// Async resolution so a slow attacker-controlled nameserver cannot stall
 	// the async worker thread (finding #10).
 	let ips=tokio::net::lookup_host(format!("{}:{}",host,u.port_or_known_default().unwrap())).await.map_err(|e|format!("{:?} {}",e,host))?;
-	// NOTE: default-deny list. Covers RFC1918 + loopback/link-local/metadata(CGNAT/shared)/
-	// "this host" + IPv6 loopback/unspecified/ULA/mapped. See findings #1.
-	let ipv4_blocked_default: IpRange<Ipv4Net> = [
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16",
-		"100.64.0.0/10",
-		"0.0.0.0/8",
-	]
-		.iter()
-		.map(|s| s.parse().unwrap())
-		.collect();
-	let allow_ips=config.allowed_networks.as_ref().map(|ips|{
-		ips.iter()
-		.map(|s| s.parse().unwrap())
-		.collect::<IpRange<Ipv4Net>>()
-	});
-	let block_ips=config.blocked_networks.as_ref().map(|ips|{
-		ips.iter()
-		.map(|s| s.parse().unwrap())
-		.collect::<IpRange<Ipv4Net>>()
-	});
-	for ip in ips{
-		match ip{
-			SocketAddr::V4(v4) => {
-				if let Some(block_ips)=&block_ips{
-					if block_ips.contains(v4.ip()){
-						return Err("Blocked address".to_owned());
-					}
-				}
-			if ipv4_blocked_default.contains(v4.ip()){
-				let allow=if let Some(allow_ips)=&allow_ips{
-					allow_ips.contains(v4.ip())
-				}else{
-					false
-				};
-				if !allow{
-					return Err("Blocked address".to_owned());
-				}
-			}
-		},
-		SocketAddr::V6(v6) => {
-			let ip=v6.ip();
-			// Loopback ::1 / unspecified :: / ULA fc00::/7 have no allow-override;
-			// operator allow-lists are IPv4-only (allowed_networks: Vec<Ipv4Net>).
-			if ip.is_multicast()||ip.is_unicast_link_local()||ip.is_loopback()||ip.is_unspecified()||ip.is_unique_local(){
-				return Err("Blocked address".to_owned());
-			}
-			// IPv4-mapped/compatible (e.g. ::ffff:169.254.169.254): apply the IPv4 policy.
-			if let Some(mapped)=ip.to_ipv4_mapped(){
-				if ipv4_blocked_default.contains(&mapped){
-					return Err("Blocked address".to_owned());
-				}
-			}
-		},
-		}
-	}
-	Ok(())
+	let ips:Vec<std::net::SocketAddr>=ips.collect();
+	crate::ssrf::validate_resolved_ips(config,&ips)
 }
 async fn get_file(
 	_path:Option<axum::extract::Path<String>>,
