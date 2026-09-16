@@ -610,7 +610,11 @@ impl RequestContext{
 			self.headers.append("X-Proxy-Error",format!("lengthHint:{}>{}",len_hint,self.config.max_size).parse().unwrap());
 			return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response())
 		}
-		let mut response_bytes=Vec::with_capacity(len_hint as usize);
+		// Never trust the remote Content-Length hint for pre-allocation
+		// (finding #5): cap the initial reservation and let the buffer grow
+		// as bytes actually arrive (still bounded by max_size below).
+		const INITIAL_CAP:u64=16*1024;
+		let mut response_bytes=Vec::with_capacity(len_hint.min(INITIAL_CAP) as usize);
 		while let Some(x) = resp.next().await{
 			match x{
 				Ok(b)=>{
