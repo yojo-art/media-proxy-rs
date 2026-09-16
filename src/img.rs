@@ -1,8 +1,43 @@
 
 use axum::response::IntoResponse;
-use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageDecoder};
 
 use crate::RequestContext;
+
+/// Header-only dimension probe (no pixel allocation). Returns None for
+/// formats the `image` crate cannot guess (JXL/JP2/JXR have per-path checks).
+fn probe_dimensions(src:&[u8])->Option<(u32,u32)>{
+	let reader=image::ImageReader::new(std::io::Cursor::new(src)).with_guessed_format().ok()?;
+	reader.into_dimensions().ok()
+}
+
+impl RequestContext{
+	/// Upper bound on decoded pixels so a small file cannot expand into
+	/// gigabytes of RAM (finding #4). Tied to max_size: decoded RGBA must fit
+	/// within the same byte budget as the download itself.
+	pub(crate) fn max_decode_pixels(&self)->u64{
+		(self.config.max_size/4).max(1)
+	}
+	pub(crate) fn dimensions_allowed(&self,width:u64,height:u64)->bool{
+		if width==0||height==0{
+			return false;
+		}
+		const MAX_SIDE:u64=32768;
+		if width>MAX_SIDE||height>MAX_SIDE{
+			return false;
+		}
+		match width.checked_mul(height){
+			Some(pixels)=>pixels<=self.max_decode_pixels(),
+			None=>false,
+		}
+	}
+	fn decode_limit_response(&mut self,msg:String)->axum::response::Response{
+		// msg is built from numbers only, so this parse is infallible; never unwrap (finding #3).
+		let value=reqwest::header::HeaderValue::from_bytes(msg.as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("DecodeLimit"));
+		self.headers.append("X-Proxy-Error",value);
+		(axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response()
+	}
+}
 
 impl RequestContext{
 	pub(crate) fn image_size_hint(&self)->(u32,u32){
@@ -57,6 +92,15 @@ impl RequestContext{
 		resize(img,max_width,max_height,filter)
 	}
 	pub(crate) fn encode_img(&mut self)->axum::response::Response{
+		// Pre-decode dimension gate for image-crate formats (finding #4).
+		// JXL/JP2/JXR return early below with their own header checks.
+		if self.codec.is_ok(){
+			if let Some((w,h))=probe_dimensions(&self.src_bytes){
+				if !self.dimensions_allowed(w as u64,h as u64){
+					return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
+				}
+			}
+		}
 		if self.parms.r#static.is_some(){
 			return self.encode_single();
 		}
@@ -67,9 +111,21 @@ impl RequestContext{
 			Ok(codec) => codec,
 			Err(e) => {
 				match self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes())){
-					Some(Ok("image/jxl"))=>{
-						let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes));
-						let img=decoder.map(|decoder|DynamicImage::from_decoder(decoder)).unwrap_or_else(|e|Err(e));
+				Some(Ok("image/jxl"))=>{
+					let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes));
+					let decoder=match decoder{
+						Ok(decoder)=>decoder,
+						Err(e)=>{
+							self.headers.append("X-Proxy-Error",format!("JpegXL Error:{:?}",e).parse().unwrap());
+							return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+						},
+					};
+					// Header-only gate before pixel allocation (finding #4).
+					let (w,h)=decoder.dimensions();
+					if !self.dimensions_allowed(w as u64,h as u64){
+						return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
+					}
+					let img=DynamicImage::from_decoder(decoder).map_err(|e|e);
 						let img=match img{
 							Ok(img) => img,
 							Err(e) => {
@@ -79,8 +135,19 @@ impl RequestContext{
 						};
 						return self.response_img(img);
 					}
-					Some(Ok("image/jp2"))=>{
-						let img=jpeg2k::Image::from_bytes(&self.src_bytes).map(|img|DynamicImage::try_from(&img));
+				Some(Ok("image/jp2"))=>{
+					// Header-only gate before pixel allocation (finding #4).
+					// DumpImage::from_bytes parses headers via read_header without decoding pixels.
+					let dims=match jpeg2k::DumpImage::from_bytes(&self.src_bytes){
+						Ok(dump)=>Some((dump.img.width(),dump.img.height())),
+						Err(_)=>None,
+					};
+					if let Some((w,h))=dims{
+						if !self.dimensions_allowed(w as u64,h as u64){
+							return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
+						}
+					}
+					let img=jpeg2k::Image::from_bytes(&self.src_bytes).map(|img|DynamicImage::try_from(&img));
 						let img=img.map(|r|r.map_err(|e|e.to_string())).map_err(|e|e.to_string()).unwrap_or_else(|e|Err(e));
 						let img=match img{
 							Ok(img) => img,
@@ -91,12 +158,20 @@ impl RequestContext{
 						};
 						return self.response_img(img);
 					},
-					Some(Ok("image/jxr"))=>{
-						fn decode_jxr(src_bytes:&[u8])->Result<Result<DynamicImage,String>, jpegxr::JXRError>{
-							use jpegxr::{ImageDecode, PixelInfo};
-							let mut decoder = ImageDecode::with_reader(std::io::Cursor::new(src_bytes))?;
-							let (width, height) = decoder.get_size()?;
-							let info = PixelInfo::from_format(decoder.get_pixel_format()?);
+				Some(Ok("image/jxr"))=>{
+					let max_pixels=self.max_decode_pixels();
+					fn decode_jxr(src_bytes:&[u8],max_pixels:u64)->Result<Result<DynamicImage,String>, jpegxr::JXRError>{
+						use jpegxr::{ImageDecode, PixelInfo};
+						let mut decoder = ImageDecode::with_reader(std::io::Cursor::new(src_bytes))?;
+						let (width, height) = decoder.get_size()?;
+						// Gate before Vec allocation (finding #4).
+						const MAX_SIDE:u64=32768;
+						let (w,h)=(width as u64,height as u64);
+						let over_limit=w==0||h==0||w>MAX_SIDE||h>MAX_SIDE||w.checked_mul(h).map_or(true,|p|p>max_pixels);
+						if over_limit{
+							return Ok(Err(format!("DecodeDimensions {}x{} over limit",width,height)));
+						}
+						let info = PixelInfo::from_format(decoder.get_pixel_format()?);
 							let stride = width as usize * info.bits_per_pixel() as usize/8;
 							let size = stride * height as usize;
 							let mut buffer = Vec::<u8>::with_capacity(size);
@@ -106,7 +181,7 @@ impl RequestContext{
 							let img=jpegxr_img(width as u32,height as u32,stride,buffer,info.format());
 							Ok(img.ok_or_else(||format!("color_format={:?}&bgr={}&channels={}&format={:?}",info.color_format(),info.bgr(),info.channels(),info.format())))
 						}
-						match decode_jxr(&self.src_bytes){
+						match decode_jxr(&self.src_bytes,max_pixels){
 							Ok(Ok(img))=>{
 								return self.response_img(img);
 							},

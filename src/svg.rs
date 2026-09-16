@@ -35,6 +35,10 @@ impl RequestContext{
 			(size.width() as u32,size.height() as u32,1f32)
 		};
 	let tf=usvg::Transform::from_scale(scale,scale);
+	// Pixel-budget gate before allocation (finding #4).
+	if (width as u64).checked_mul(height as u64).map_or(true,|pixels|pixels>self.max_decode_pixels()){
+		return Err(());
+	}
 	// u32 arithmetic can overflow on crafted SVG sizes; never panic (finding #3).
 	// A pixel-budget gate is applied separately (finding #4).
 	let len=(width as u64).checked_mul(height as u64).and_then(|n|n.checked_mul(4));
