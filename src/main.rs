@@ -209,9 +209,9 @@ async fn check_url(config:&Arc<ConfigFile>,url:impl AsRef<str>)->Result<(),Strin
 		return Err("Blocked address".to_owned());
 	}
 	// Async resolution so a slow attacker-controlled nameserver cannot stall
-	// the async worker thread (finding #10).
-	let ips=tokio::net::lookup_host(format!("{}:{}",host,u.port_or_known_default().unwrap())).await.map_err(|e|format!("{:?} {}",e,host))?;
-	let ips:Vec<std::net::SocketAddr>=ips.collect();
+	// the async worker thread (finding #10). Shared LRU cache with the
+	// connect-time resolver keeps both DNS views consistent.
+	let ips=crate::ssrf::cached_lookup_host(host).await.map_err(|e|format!("{:?} {}",e,host))?;
 	crate::ssrf::validate_resolved_ips(config,&ips)
 }
 async fn get_file(

@@ -13,9 +13,52 @@
 //! pre-check vs connect resolutions a non-issue.
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::ConfigFile;
+
+/// DNS キャッシュの TTL と上限。短めの TTL で rebinding 耐性を保ちつつ、
+/// check_url と接続時 resolver の双方の DNS クエリを削減する。
+const DNS_CACHE_TTL:Duration=Duration::from_secs(60);
+const DNS_CACHE_CAP:usize=1024;
+
+struct DnsEntry{
+	addrs:Vec<SocketAddr>,
+	expires:Instant,
+}
+
+static DNS_CACHE:LazyLock<Mutex<lru::LruCache<String,DnsEntry>>>=LazyLock::new(||{
+	Mutex::new(lru::LruCache::new(NonZeroUsize::new(DNS_CACHE_CAP).unwrap()))
+});
+
+/// ホスト名→アドレスの簡易 LRU キャッシュ付き解決。check_url と
+/// ValidatingResolver で共有するため両者の DNS ビューが一致する。
+/// ポートは呼び出し側で付け替えるため `:0` で解決する。
+pub(crate) async fn cached_lookup_host(host:&str)->std::io::Result<Vec<SocketAddr>>{
+	let key=normalize_host(host);
+	{
+		let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
+		let hit=match cache.get(&key){
+			Some(entry) if entry.expires>Instant::now()=>Some(entry.addrs.clone()),
+			_=>None,
+		};
+		if hit.is_none(){
+			// 期限切れエントリを残さない。
+			cache.pop(&key);
+		}
+		if let Some(addrs)=hit{
+			return Ok(addrs);
+		}
+	}
+	let addrs:Vec<SocketAddr>=tokio::net::lookup_host(format!("{}:0",host)).await?.collect();
+	{
+		let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
+		cache.put(key,DnsEntry{addrs:addrs.clone(),expires:Instant::now()+DNS_CACHE_TTL});
+	}
+	Ok(addrs)
+}
 
 /// Lowercase + strip a trailing FQDN dot so `example.com.` matches a
 /// `blocked_hosts` entry of `example.com`.
@@ -141,9 +184,8 @@ impl reqwest::dns::Resolve for ValidatingResolver{
 			// The egress proxy itself is not a fetch target: resolve plainly.
 			if let Some(proxy_host)=proxy_host.as_ref(){
 				if normalize_host(&host)==*proxy_host{
-					let ips:Vec<SocketAddr>=tokio::net::lookup_host(format!("{}:0",host)).await
-						.map_err(|e|Box::new(e) as BoxError)?
-						.collect();
+					let ips:Vec<SocketAddr>=cached_lookup_host(&host).await
+						.map_err(|e|Box::new(e) as BoxError)?;
 					let addrs:reqwest::dns::Addrs=Box::new(ips.into_iter());
 					return Ok(addrs);
 				}
@@ -153,9 +195,8 @@ impl reqwest::dns::Resolve for ValidatingResolver{
 				return Err(err);
 			}
 			// Port 0: the connector replaces it with the URL's port.
-			let ips:Vec<SocketAddr>=tokio::net::lookup_host(format!("{}:0",host)).await
-				.map_err(|e|Box::new(e) as BoxError)?
-				.collect();
+			let ips:Vec<SocketAddr>=cached_lookup_host(&host).await
+				.map_err(|e|Box::new(e) as BoxError)?;
 			// Fail closed on any blocked address (same policy as check_url).
 			if let Err(s)=validate_resolved_ips(&config,&ips){
 				let err:BoxError=s.into();
@@ -264,8 +305,19 @@ mod tests{
 	}
 
 	#[test]
-	fn resolver_blocks_rebinding_target(){
-		// localhost must fail at resolve time even though "resolving" succeeds.
+	fn dns_cache_returns_consistent_view(){
+		let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+		rt.block_on(async{
+			let a=cached_lookup_host("localhost").await.unwrap();
+			// Case + trailing-dot normalization hits the same entry.
+			let b=cached_lookup_host("LOCALHOST.").await.unwrap();
+			assert_eq!(a,b);
+			assert!(!a.is_empty());
+		});
+	}
+
+	#[test]
+	fn resolver_blocks_rebinding_target(){		// localhost must fail at resolve time even though "resolving" succeeds.
 		let config=Arc::new(test_config());
 		let r=ValidatingResolver::new(config);
 		let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
