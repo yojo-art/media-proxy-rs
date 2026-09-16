@@ -193,7 +193,17 @@ async fn check_url(config:&Arc<ConfigFile>,url:impl AsRef<str>)->Result<(),Strin
 	use iprange::IpRange;
 	use ipnet::Ipv4Net;
 	let ips=format!("{}:{}",host,u.port_or_known_default().unwrap()).to_socket_addrs().map_err(|e|format!("{:?} {}",e,host))?;
-	let ipv4_private_range: IpRange<Ipv4Net> = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+	// NOTE: default-deny list. Covers RFC1918 + loopback/link-local/metadata(CGNAT/shared)/
+	// "this host" + IPv6 loopback/unspecified/ULA/mapped. See findings #1.
+	let ipv4_blocked_default: IpRange<Ipv4Net> = [
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"100.64.0.0/10",
+		"0.0.0.0/8",
+	]
 		.iter()
 		.map(|s| s.parse().unwrap())
 		.collect();
@@ -215,22 +225,31 @@ async fn check_url(config:&Arc<ConfigFile>,url:impl AsRef<str>)->Result<(),Strin
 						return Err("Blocked address".to_owned());
 					}
 				}
-				if ipv4_private_range.contains(v4.ip()){
-					let allow=if let Some(allow_ips)=&allow_ips{
-						allow_ips.contains(v4.ip())
-					}else{
-						false
-					};
-					if !allow{
-						return Err("Blocked address".to_owned());
-					}
-				}
-			},
-			SocketAddr::V6(v6) => {
-				if v6.ip().is_multicast()||v6.ip().is_unicast_link_local(){
+			if ipv4_blocked_default.contains(v4.ip()){
+				let allow=if let Some(allow_ips)=&allow_ips{
+					allow_ips.contains(v4.ip())
+				}else{
+					false
+				};
+				if !allow{
 					return Err("Blocked address".to_owned());
 				}
-			},
+			}
+		},
+		SocketAddr::V6(v6) => {
+			let ip=v6.ip();
+			// Loopback ::1 / unspecified :: / ULA fc00::/7 have no allow-override;
+			// operator allow-lists are IPv4-only (allowed_networks: Vec<Ipv4Net>).
+			if ip.is_multicast()||ip.is_unicast_link_local()||ip.is_loopback()||ip.is_unspecified()||ip.is_unique_local(){
+				return Err("Blocked address".to_owned());
+			}
+			// IPv4-mapped/compatible (e.g. ::ffff:169.254.169.254): apply the IPv4 policy.
+			if let Some(mapped)=ip.to_ipv4_mapped(){
+				if ipv4_blocked_default.contains(&mapped){
+					return Err("Blocked address".to_owned());
+				}
+			}
+		},
 		}
 	}
 	Ok(())
