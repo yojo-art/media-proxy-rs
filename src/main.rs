@@ -415,6 +415,9 @@ async fn get_file(
 		}
 	}
 	headers.append("Cache-Control","max-age=300".parse().unwrap());
+	// Refuse MIME sniffing so reflected content types cannot be reinterpreted
+	// (finding #7; also mitigates the #9 sniffing concern).
+	headers.append("X-Content-Type-Options","nosniff".parse().unwrap());
 	for line in config.append_headers.iter(){
 		if let Some(idx)=line.find(":"){
 			if idx+1>=line.len(){
@@ -543,9 +546,22 @@ impl RequestContext{
 				self.headers.remove("Cache-Control");
 				self.headers.append("Cache-Control","max-age=31536000, immutable".parse().unwrap());
 				return Err(self.response_img(img));
-			}else{
-				return Err((axum::http::StatusCode::OK,self.headers.clone(),self.src_bytes.clone()).into_response());
+		}else{
+			// Never reflect the remote SVG bytes inline: serving attacker XML
+			// as image/svg+xml from the proxy origin is a stored-XSS vector
+			// (finding #7). Fail closed, or serve the dummy image when the
+			// caller asked for a fallback.
+			self.headers.remove("Content-Type");
+			self.headers.remove("Content-Length");
+			self.headers.remove("Content-Range");
+			self.headers.remove("Accept-Ranges");
+			if self.parms.fallback.is_some(){
+				self.headers.append("Content-Type","image/png".parse().unwrap());
+				return Err((axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response());
 			}
+			self.headers.append("X-Proxy-Error","SvgEncodeError".parse().unwrap());
+			return Err((axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response());
+		}
 		}else if is_img||self.codec.is_ok(){
 			self.headers.remove("Content-Length");
 			self.headers.remove("Content-Range");
