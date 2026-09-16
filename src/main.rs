@@ -211,10 +211,12 @@ async fn check_url(config:&Arc<ConfigFile>,url:impl AsRef<str>)->Result<(),Strin
 			return Err("Blocked address".to_owned());
 		}
 	}
-	use std::net::{SocketAddr, ToSocketAddrs};
+	use std::net::SocketAddr;
 	use iprange::IpRange;
 	use ipnet::Ipv4Net;
-	let ips=format!("{}:{}",host,u.port_or_known_default().unwrap()).to_socket_addrs().map_err(|e|format!("{:?} {}",e,host))?;
+	// Async resolution so a slow attacker-controlled nameserver cannot stall
+	// the async worker thread (finding #10).
+	let ips=tokio::net::lookup_host(format!("{}:{}",host,u.port_or_known_default().unwrap())).await.map_err(|e|format!("{:?} {}",e,host))?;
 	// NOTE: default-deny list. Covers RFC1918 + loopback/link-local/metadata(CGNAT/shared)/
 	// "this host" + IPv6 loopback/unspecified/ULA/mapped. See findings #1.
 	let ipv4_blocked_default: IpRange<Ipv4Net> = [
