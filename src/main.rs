@@ -292,7 +292,8 @@ async fn get_file(
 			return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE,headers).into_response());
 		}
 	};
-	println!("{}\t{}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
+	// q.url uses {:?} so percent-decoded CR/LF cannot forge log lines (finding #8).
+	println!("{}\t{:?}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
 		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
 		q.url,
 		q.avatar,
