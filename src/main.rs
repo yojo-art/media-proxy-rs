@@ -536,15 +536,23 @@ impl RequestContext{
 			}
 			return Err(resp);
 		}
+		// browsersafe(音声/動画)以外はリモートバイトを中継しない: ダミー画像を返す。
+		// Content-Type 不明もここに含める (省略による回避を防ぐ)。
+		let mut is_browsersafe=false;
 		if let Some(media)=self.headers.get("Content-Type"){
 			let s=String::from_utf8_lossy(media.as_bytes());
 			if crate::browsersafe::FILE_TYPE_BROWSERSAFE.contains(&s.as_ref()){
-
-			}else{
-				self.headers.remove("Content-Type");
-				self.headers.append("Content-Type","application/octet-stream".parse().unwrap());
-				Self::disposition_ext(&mut self.headers,".unknown");
+				is_browsersafe=true;
 			}
+		}
+		if !is_browsersafe{
+			self.headers.remove("Content-Type");
+			self.headers.remove("Content-Length");
+			self.headers.remove("Content-Range");
+			self.headers.remove("Accept-Ranges");
+			self.headers.append("Content-Type","image/png".parse().unwrap());
+			self.headers.append("X-Proxy-Error","NonBrowsersafeType".parse().unwrap());
+			return Err((axum::http::StatusCode::OK,self.headers.clone(),(*self.dummy_img).clone()).into_response());
 		}
 		let body=axum::body::Body::from_stream(resp);
 		if status.is_success(){
