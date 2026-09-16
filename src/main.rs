@@ -604,7 +604,7 @@ impl RequestContext{
 
 			}else{
 				self.headers.remove("Content-Type");
-				self.headers.append("Content-Type","octet-stream".parse().unwrap());
+				self.headers.append("Content-Type","application/octet-stream".parse().unwrap());
 				Self::disposition_ext(&mut self.headers,".unknown");
 			}
 		}
