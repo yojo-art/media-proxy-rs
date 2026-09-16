@@ -10,6 +10,13 @@ mod svg;
 mod browsersafe;
 mod image_test;
 
+/// Bounds concurrent fetch+encode work so that per-request memory budgets
+/// (#4/#5) cannot be multiplied without limit (finding #6). Auth and
+/// per-client rate limiting remain deployment decisions (e.g. reverse proxy
+/// or network policy in front of this Misskey/Cherrypick media proxy).
+static FETCH_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
+	std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(32));
+
 #[derive(Debug,Serialize,Deserialize)]
 pub struct ConfigFile{
 	bind_addr: String,
@@ -275,6 +282,16 @@ async fn get_file(
 	(client,config,dummy_img,fontdb):(reqwest::Client,Arc<ConfigFile>,Arc<Vec<u8>>,Arc<resvg::usvg::fontdb::Database>),
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 )->Result<(axum::http::StatusCode,HeaderMap,axum::body::Body),axum::response::Response>{
+	let mut headers=HeaderMap::new();
+	// Bound concurrent work (finding #6). The permit is held for the whole
+	// request (fetch + encode) so memory/CPU budgets cannot be stacked.
+	let _permit=match FETCH_SEMAPHORE.acquire().await{
+		Ok(permit)=>permit,
+		Err(_)=>{
+			headers.append("X-Proxy-Error","Overloaded".parse().unwrap());
+			return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE,headers).into_response());
+		}
+	};
 	println!("{}\t{}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
 		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
 		q.url,
@@ -285,7 +302,6 @@ async fn get_file(
 		q.r#static,
 		q.fallback,
 	);
-	let mut headers=HeaderMap::new();
 	if let Ok(url)=q.url.parse(){
 		headers.append("X-Remote-Url",url);
 	}
