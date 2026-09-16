@@ -21,12 +21,15 @@ use crate::ConfigFile;
 
 /// DNS キャッシュの TTL と上限。短めの TTL で rebinding 耐性を保ちつつ、
 /// check_url と接続時 resolver の双方の DNS クエリを削減する。
+/// 失敗（NXDOMAIN 等）も短時間だけ保持し、存在しない攻撃者ドメインへの
+/// 反復クエリで DNS を叩き続けられないようにする。
 const DNS_CACHE_TTL:Duration=Duration::from_secs(60);
+const DNS_CACHE_NEGATIVE_TTL:Duration=Duration::from_secs(10);
 const DNS_CACHE_CAP:usize=1024;
 
-struct DnsEntry{
-	addrs:Vec<SocketAddr>,
-	expires:Instant,
+enum DnsEntry{
+	Positive{addrs:Vec<SocketAddr>,expires:Instant},
+	Negative{kind:std::io::ErrorKind,expires:Instant},
 }
 
 static DNS_CACHE:LazyLock<Mutex<lru::LruCache<String,DnsEntry>>>=LazyLock::new(||{
@@ -40,24 +43,41 @@ pub(crate) async fn cached_lookup_host(host:&str)->std::io::Result<Vec<SocketAdd
 	let key=normalize_host(host);
 	{
 		let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
+		let now=Instant::now();
 		let hit=match cache.get(&key){
-			Some(entry) if entry.expires>Instant::now()=>Some(entry.addrs.clone()),
+			Some(DnsEntry::Positive{addrs,expires}) if *expires>now=>Some(Ok(addrs.clone())),
+			Some(DnsEntry::Negative{kind,expires}) if *expires>now=>{
+				Some(Err(std::io::Error::new(*kind,"cached dns failure")))
+			},
 			_=>None,
 		};
 		if hit.is_none(){
 			// 期限切れエントリを残さない。
 			cache.pop(&key);
 		}
-		if let Some(addrs)=hit{
-			return Ok(addrs);
+		if let Some(result)=hit{
+			return result;
 		}
 	}
-	let addrs:Vec<SocketAddr>=tokio::net::lookup_host(format!("{}:0",host)).await?.collect();
-	{
-		let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
-		cache.put(key,DnsEntry{addrs:addrs.clone(),expires:Instant::now()+DNS_CACHE_TTL});
+	match tokio::net::lookup_host(format!("{}:0",host)).await{
+		Ok(resolved)=>{
+			let addrs:Vec<SocketAddr>=resolved.collect();
+			let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
+			if addrs.is_empty(){
+				// アドレスなしも接続不能として短期保持する。
+				cache.put(key,DnsEntry::Negative{kind:std::io::ErrorKind::Other,expires:Instant::now()+DNS_CACHE_NEGATIVE_TTL});
+			}else{
+				cache.put(key,DnsEntry::Positive{addrs:addrs.clone(),expires:Instant::now()+DNS_CACHE_TTL});
+			}
+			Ok(addrs)
+		},
+		Err(e)=>{
+			let kind=e.kind();
+			let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
+			cache.put(key,DnsEntry::Negative{kind,expires:Instant::now()+DNS_CACHE_NEGATIVE_TTL});
+			Err(e)
+		},
 	}
-	Ok(addrs)
 }
 
 /// Lowercase + strip a trailing FQDN dot so `example.com.` matches a
@@ -313,6 +333,18 @@ mod tests{
 			let b=cached_lookup_host("LOCALHOST.").await.unwrap();
 			assert_eq!(a,b);
 			assert!(!a.is_empty());
+		});
+	}
+
+	#[test]
+	fn dns_cache_negative(){
+		let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+		rt.block_on(async{
+			// .invalid は RFC 2606 で解決不能が保証される。
+			let name="nonexistent-name-for-test.invalid";
+			assert!(cached_lookup_host(name).await.is_err());
+			// 2 回目はネガティブキャッシュから即時 Err。
+			assert!(cached_lookup_host(name).await.is_err());
 		});
 	}
 
