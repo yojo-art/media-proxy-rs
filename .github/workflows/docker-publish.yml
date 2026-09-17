@@ -48,18 +48,18 @@ jobs:
           platform=${{ matrix.platform }}
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           image: public.ecr.aws/vend/tonistiigi/binfmt:latest
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Log into registry ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -69,12 +69,12 @@ jobs:
       # https://github.com/docker/metadata-action
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
 
       - name: CacheMount
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: cache
         with:
           path: |
@@ -83,7 +83,7 @@ jobs:
           key: cache-${{ matrix.platform }}-${{ hashFiles('**/Cargo.toml') }}
 
       - name: inject cache into docker
-        uses: reproducible-containers/buildkit-cache-dance@v3.1.0
+        uses: reproducible-containers/buildkit-cache-dance@v3.4.0
         with:
           cache-map: |
             {
@@ -95,7 +95,7 @@ jobs:
           skip-extraction: ${{ steps.cache.outputs.cache-hit }}
 
       - name: Build and Export
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -109,7 +109,7 @@ jobs:
       - name: Build and push Docker image
         if: github.event_name != 'pull_request'
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -126,7 +126,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
       - name: Upload digest
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: /tmp/digests/*
@@ -134,7 +134,7 @@ jobs:
           retention-days: 1
 
       - name: Upload Docker Image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/${{ env.PLATFORM_PAIR }}.tar
@@ -162,12 +162,12 @@ jobs:
           platform=${{ matrix.platform }}
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
       - name: Download Docker Image
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           image: public.ecr.aws/vend/tonistiigi/binfmt:latest
       - name: Load image
@@ -185,17 +185,15 @@ jobs:
         working-directory: /tmp/app
         run: |
           gzip -k media-proxy-rs
-      - name: Upload release
+      - name: Upload release asset
         if: github.repository == 'yojo-art/media-proxy-rs'
-        uses: WebFreak001/deploy-nightly@v3.2.0
-        with:
-          upload_url: https://uploads.github.com/repos/${{ github.repository }}/releases/192617419/assets{?name,label} # find out this value by opening https://api.github.com/repos/<owner>/<repo>/releases in your browser and copy the full "upload_url" value including the {?name,label} part
-          release_id: 192617419 # same as above (id can just be taken out the upload_url, it's used to find old releases)
-          asset_path: /tmp/app/media-proxy-rs.gz # path to archive to upload
-          asset_name: media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz # name to upload the release as, use $$ to insert date (YYYYMMDD) and 6 letter commit hash
-          asset_content_type: application/gzip # required by GitHub API
-          max_releases: 7 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
-          ignore_hash: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # nightly リリースが無ければ初回のみ作成（複数matrixの同時作成レースは無視し、uploadの成否で判定する）
+          gh release view nightly --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create nightly --repo "${{ github.repository }}" --title "Nightly" --notes "Automated nightly builds." --prerelease || true
+          gh release upload nightly "/tmp/app/media-proxy-rs.gz#media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz" --repo "${{ github.repository }}" --clobber
 
   e2e-test:
     runs-on: ubuntu-latest
@@ -216,17 +214,17 @@ jobs:
           platform=${{ matrix.platform }}
           echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: |
             asset/dummy.png
           sparse-checkout-cone-mode: false
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           image: public.ecr.aws/vend/tonistiigi/binfmt:latest
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}
@@ -235,7 +233,7 @@ jobs:
           docker load --input ${{ runner.temp }}/${{ env.PLATFORM_PAIR }}.tar
           docker image ls -a
       - name: Setup ImageMagick
-        uses: mfinelli/setup-imagemagick@v6
+        uses: mfinelli/setup-imagemagick@v8
       - name: Install APT Packages
         run: |
           sudo apt-get install -y libjxr-tools
@@ -284,7 +282,7 @@ jobs:
       - build
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
@@ -293,19 +291,19 @@ jobs:
       # https://github.com/sigstore/cosign-installer
       - name: Install cosign
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4
         with:
           cosign-release: 'v2.1.1'
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
       - name: Log into registry ${{ env.REGISTRY }}
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
