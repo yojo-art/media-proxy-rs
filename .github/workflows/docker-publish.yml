@@ -139,6 +139,20 @@ jobs:
           name: ${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/${{ env.PLATFORM_PAIR }}.tar
 
+  create-release:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    steps:
+      - name: Ensure nightly release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 単一ジョブで1回だけ作成し、matrix側の作成レースを無くす
+          gh release view nightly --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create nightly --repo "${{ github.repository }}" --title "Nightly" --notes "Automated nightly builds." --prerelease
+
   release:
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
@@ -147,8 +161,10 @@ jobs:
       id-token: write
     needs:
       - build
+      - create-release
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         platform:
           - linux/386
@@ -191,9 +207,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # nightly リリースが無ければ初回のみ作成（複数matrixの同時作成レースは無視し、uploadの成否で判定する）
-          gh release view nightly --repo "${{ github.repository }}" >/dev/null 2>&1 || \
-            gh release create nightly --repo "${{ github.repository }}" --title "Nightly" --notes "Automated nightly builds." --prerelease || true
+          # release作成はcreate-releaseジョブ済み。ここではuploadのみ行う。
+          # 同一リリースへの並行uploadによるGitHub APIの一時的404を避けるため、
+          # 本ジョブは strategy.max-parallel: 1 で直列化している。
           gh release upload nightly "/tmp/app/media-proxy-rs.gz#media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz" --repo "${{ github.repository }}" --clobber
 
   e2e-test:
