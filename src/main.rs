@@ -178,7 +178,14 @@ fn main() {
 			// only intercepts http:// targets, so https:// targets (the
 			// majority of real media URLs) would otherwise connect directly,
 			// bypassing the proxy and the warning above entirely.
-			client.proxy(reqwest::Proxy::all(url).unwrap())
+			let proxy=match reqwest::Proxy::all(url){
+				Ok(proxy)=>proxy,
+				Err(e)=>{
+					eprintln!("invalid proxy configuration {:?}: {}",url,e);
+					std::process::exit(1);
+				},
+			};
+			client.proxy(proxy)
 		},
 		None=>client,
 	};
@@ -276,10 +283,14 @@ async fn get_file(
 	println!("check_url {}ms",(chrono::Utc::now()-time).num_milliseconds());
 	// Bound concurrent work (finding #6). The permit is acquired only after
 	// URL validation so DNS resolution cannot occupy every permit (M-03) and
-	// is held through fetch+encode so memory/CPU budgets cannot be stacked.
-	let _permit=match FETCH_SEMAPHORE.acquire().await{
-		Ok(permit)=>permit,
-		Err(_)=>{
+	// is held through buffered fetch+encode so memory/CPU budgets cannot be
+	// stacked. Streaming browsersafe passthrough below releases it when the
+	// response is handed off (its memory footprint stays small while streaming).
+	// NOTE: acquire() on a never-closed semaphore never fails with Err, so a
+	// timeout is what actually sheds load with 503 instead of queueing forever.
+	let _permit=match tokio::time::timeout(std::time::Duration::from_secs(30),FETCH_SEMAPHORE.acquire()).await{
+		Ok(Ok(permit))=>permit,
+		_=>{
 			headers.append("X-Proxy-Error","Overloaded".parse().unwrap());
 			return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE,headers).into_response());
 		}

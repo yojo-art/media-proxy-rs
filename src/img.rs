@@ -187,7 +187,10 @@ impl RequestContext{
 					let decoder=match decoder{
 						Ok(decoder)=>decoder,
 						Err(e)=>{
-							self.headers.append("X-Proxy-Error",format!("JpegXL Error:{:?}",e).parse().unwrap());
+							// Debug output derives from external bytes and may contain
+							// header-invalid characters; never unwrap (finding #3).
+							let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
+							self.headers.append("X-Proxy-Error",value);
 							return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 						},
 					};
@@ -236,10 +239,8 @@ impl RequestContext{
 						let mut decoder = ImageDecode::with_reader(std::io::Cursor::new(src_bytes))?;
 						let (width, height) = decoder.get_size()?;
 						// Gate before Vec allocation (finding #4).
-						const MAX_SIDE:u64=32768;
 						let (w,h)=(width as u64,height as u64);
-						let over_limit=w==0||h==0||w>MAX_SIDE||h>MAX_SIDE||w.checked_mul(h).map_or(true,|p|p>max_pixels);
-						if over_limit{
+						if !crate::img::dimensions_allowed_for(max_pixels,w,h){
 							return Ok(Err(format!("DecodeDimensions {}x{} over limit",width,height)));
 						}
 						let info = PixelInfo::from_format(decoder.get_pixel_format()?);

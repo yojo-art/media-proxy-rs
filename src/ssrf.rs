@@ -155,7 +155,9 @@ pub(crate) fn is_host_blocked(blocked_hosts:Option<&Vec<String>>,host:&str)->boo
 	})
 }
 
-fn ipv4_blocked_default()->iprange::IpRange<ipnet::Ipv4Net>{
+// Built once: this policy never changes at runtime, so rebuilding it per IP
+// per request is pure overhead.
+static IPV4_BLOCKED_DEFAULT:std::sync::LazyLock<iprange::IpRange<ipnet::Ipv4Net>>=std::sync::LazyLock::new(||{
 	// Default-deny list. Covers RFC1918 + loopback/link-local/metadata
 	// (CGNAT/shared)/"this host" (finding #1), plus non-routable/special-use
 	// ranges that are still sometimes routed internally (M-04).
@@ -178,7 +180,7 @@ fn ipv4_blocked_default()->iprange::IpRange<ipnet::Ipv4Net>{
 		.iter()
 		.map(|s| s.parse().expect("static CIDR"))
 		.collect()
-}
+});
 
 /// Operator-configured CIDRs are validated once at startup
 /// ([`validate_network_config`]); at request time invalid entries are ignored
@@ -246,7 +248,7 @@ pub(crate) fn is_ip_blocked(config:&ConfigFile,ip:IpAddr)->bool{
 					return true;
 				}
 			}
-			if ipv4_blocked_default().contains(&v4){
+			if IPV4_BLOCKED_DEFAULT.contains(&v4){
 				if let Some(allowed)=config.allowed_networks.as_ref(){
 					if parse_v4_nets(allowed).contains(&v4){
 						return false;
