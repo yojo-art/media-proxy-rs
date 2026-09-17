@@ -174,7 +174,11 @@ fn main() {
 			// apply to fetch targets in this mode. Only check_url's independent
 			// pre-check protects proxied requests.
 			eprintln!("WARNING: proxy is configured ({}). Connect-time SSRF re-validation (DNS-rebinding protection) does not apply to fetch targets in this mode; ensure the proxy itself enforces an equivalent SSRF policy.",url);
-			client.proxy(reqwest::Proxy::http(url).unwrap())
+			// Proxy::all (not Proxy::http): code-review finding -- Proxy::http
+			// only intercepts http:// targets, so https:// targets (the
+			// majority of real media URLs) would otherwise connect directly,
+			// bypassing the proxy and the warning above entirely.
+			client.proxy(reqwest::Proxy::all(url).unwrap())
 		},
 		None=>client,
 	};
@@ -549,22 +553,43 @@ impl RequestContext{
 			self.load_all(resp).await?;
 			let dummy_img=self.dummy_img.clone();
 			let is_fallback=self.parms.fallback.is_some();
+			let timeout_ms=self.config.timeout;
 			let mut header=self.headers.clone();
 			let mut handle=self;
-			let resp=if let Ok(resp)=tokio::runtime::Handle::current().spawn_blocking(move ||{
-				let resp=handle.encode_img();
-				resp
-			}).await{
-				resp
-			}else{
-				header.append("X-Proxy-Error",format!("ImageEncodeThread").parse().unwrap());
-				return Err(if is_fallback{
-					header.remove("Content-Type");
-					header.append("Content-Type","image/png".parse().unwrap());
-					(axum::http::StatusCode::OK,header,(*dummy_img).clone()).into_response()
-				}else{
-					(axum::http::StatusCode::INTERNAL_SERVER_ERROR,header).into_response()
-				});
+			// Raster decode/resize/encode is CPU-bound and attacker-controlled,
+			// same as SVG rendering (H-01): bound it with a deadline so a
+			// pathological image cannot occupy a blocking-pool thread
+			// indefinitely (code-review finding: this path had no timeout at
+			// all, unlike the SVG path). Same caveat as svg.rs's
+			// render_svg_blocking: abort() cannot preempt an already-running
+			// closure, but does stop one still queued on the blocking pool.
+			let task=tokio::runtime::Handle::current().spawn_blocking(move ||{
+				handle.encode_img()
+			});
+			let abort_handle=task.abort_handle();
+			let resp=match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms.max(1)),task).await{
+				Ok(Ok(resp))=>resp,
+				Ok(Err(_join_error))=>{
+					header.append("X-Proxy-Error",format!("ImageEncodeThread").parse().unwrap());
+					return Err(if is_fallback{
+						header.remove("Content-Type");
+						header.append("Content-Type","image/png".parse().unwrap());
+						(axum::http::StatusCode::OK,header,(*dummy_img).clone()).into_response()
+					}else{
+						(axum::http::StatusCode::INTERNAL_SERVER_ERROR,header).into_response()
+					});
+				},
+				Err(_elapsed)=>{
+					abort_handle.abort();
+					header.append("X-Proxy-Error","ImageEncodeTimeout".parse().unwrap());
+					return Err(if is_fallback{
+						header.remove("Content-Type");
+						header.append("Content-Type","image/png".parse().unwrap());
+						(axum::http::StatusCode::OK,header,(*dummy_img).clone()).into_response()
+					}else{
+						(axum::http::StatusCode::GATEWAY_TIMEOUT,header).into_response()
+					});
+				},
 			};
 			if is_fallback{
 				return Err(if resp.status()==axum::http::StatusCode::OK{
