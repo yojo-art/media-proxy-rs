@@ -84,15 +84,28 @@ pub(crate) fn render_svg(src_bytes:&[u8],fontdb:Arc<usvg::fontdb::Database>,size
 	}
 }
 /// Runs [`render_svg`] on the blocking pool with a deadline (H-01). On
-/// timeout the render task is detached (the caller stops waiting and releases
-/// its semaphore permit); file hrefs are disabled, so the remaining work is
-/// bounded by the SVG itself.
+/// timeout the caller stops waiting and releases its semaphore permit; file
+/// hrefs are disabled, so the remaining work is bounded by the SVG itself.
+///
+/// Caveat (code-review finding): `tokio::time::timeout` only stops the
+/// *caller* from awaiting -- a blocking-pool closure that has already started
+/// running cannot be preempted, so a render already in flight when the
+/// deadline fires keeps consuming CPU/memory on its own thread until it
+/// finishes. `abort()` is called anyway because it is not a no-op: for a
+/// render that is still *queued* (not yet picked up by a worker thread, e.g.
+/// because the blocking pool is under pressure from many concurrent slow
+/// renders), it prevents that queued closure from ever starting at all,
+/// which is exactly the pile-up scenario a deadline is meant to cap.
 pub(crate) async fn render_svg_blocking(src_bytes:Vec<u8>,fontdb:Arc<usvg::fontdb::Database>,size_hint:(u32,u32),max_decode_pixels:u64,timeout_ms:u64)->Result<DynamicImage,()>{
 	let task=tokio::task::spawn_blocking(move||render_svg(&src_bytes,fontdb,size_hint,max_decode_pixels));
+	let abort_handle=task.abort_handle();
 	match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms.max(1)),task).await{
 		Ok(Ok(result))=>result,
 		Ok(Err(_join_error))=>Err(()),
-		Err(_elapsed)=>Err(()),
+		Err(_elapsed)=>{
+			abort_handle.abort();
+			Err(())
+		},
 	}
 }
 fn size(tree:&usvg::Tree)->usvg::Size{
