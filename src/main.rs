@@ -267,10 +267,17 @@ async fn get_file(
 			return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE,headers).into_response());
 		}
 	};
-	// NOTE: DNS rebinding (TOCTOU between check_url and connect) remains a residual
-	// risk: check_url and reqwest resolve the host independently. Redirects are at
-	// least re-validated hop by hop below; full pinning (resolve + connect to the
-	// validated IP, e.g. via ClientBuilder::resolve per request) is future work.
+	// DNS-rebinding TOCTOU (finding #2) is closed for direct fetches: reqwest's
+	// ValidatingResolver (ssrf.rs) re-validates the addresses actually connected
+	// to, using the same DNS cache as check_url, so a second (possibly attacker-
+	// controlled) resolution can never bypass the policy. Redirects are also
+	// re-validated hop by hop below regardless.
+	// Residual risk: when `config.proxy` is set, the egress proxy — not this
+	// process — resolves and connects to the target host, so ValidatingResolver
+	// never sees the target's addresses (see ssrf.rs's module doc "Caveat" and
+	// `ValidatingResolver::resolve`'s `proxy_host` branch). Only this check_url
+	// pre-check protects proxied requests, and the classic rebinding TOCTOU
+	// applies again in that configuration.
 	const MAX_REDIRECTS:u8=5;
 	let mut current_url=q.url.clone();
 	let mut redirects:u8=0;
