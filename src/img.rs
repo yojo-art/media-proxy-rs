@@ -6,9 +6,24 @@ use crate::RequestContext;
 
 /// Header-only dimension probe (no pixel allocation). Returns None for
 /// formats the `image` crate cannot guess (JXL/JP2/JXR have per-path checks).
-fn probe_dimensions(src:&[u8])->Option<(u32,u32)>{
+pub(crate) fn probe_dimensions(src:&[u8])->Option<(u32,u32)>{
 	let reader=image::ImageReader::new(std::io::Cursor::new(src)).with_guessed_format().ok()?;
 	reader.into_dimensions().ok()
+}
+
+/// Shared decode-dimension policy (also used for SVG-embedded rasters, M-01).
+pub(crate) fn dimensions_allowed_for(max_decode_pixels:u64,width:u64,height:u64)->bool{
+	if width==0||height==0{
+		return false;
+	}
+	const MAX_SIDE:u64=32768;
+	if width>MAX_SIDE||height>MAX_SIDE{
+		return false;
+	}
+	match width.checked_mul(height){
+		Some(pixels)=>pixels<=max_decode_pixels,
+		None=>false,
+	}
 }
 
 impl RequestContext{
@@ -19,17 +34,7 @@ impl RequestContext{
 		(self.config.max_size/4).max(1)
 	}
 	pub(crate) fn dimensions_allowed(&self,width:u64,height:u64)->bool{
-		if width==0||height==0{
-			return false;
-		}
-		const MAX_SIDE:u64=32768;
-		if width>MAX_SIDE||height>MAX_SIDE{
-			return false;
-		}
-		match width.checked_mul(height){
-			Some(pixels)=>pixels<=self.max_decode_pixels(),
-			None=>false,
-		}
+		dimensions_allowed_for(self.max_decode_pixels(),width,height)
 	}
 	fn decode_limit_response(&mut self,msg:String)->axum::response::Response{
 		// msg is built from numbers only, so this parse is infallible; never unwrap (finding #3).

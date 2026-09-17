@@ -6,10 +6,22 @@ use resvg::usvg;
 /// `href` resolution policy: data URIs only. The default `resolve_string`
 /// treats the href as a local file path and reads it with `std::fs::read`,
 /// so an attacker SVG could exfiltrate local files or read `/dev/zero`
-/// forever (H-01).
-fn image_href_resolver() -> usvg::ImageHrefResolver<'static> {
+/// forever (H-01). Data URIs are additionally dimension-checked before resvg
+/// decodes them, because the canvas gate below does not cover embedded
+/// rasters (M-01).
+fn image_href_resolver(max_decode_pixels:u64) -> usvg::ImageHrefResolver<'static> {
+	let resolve_data=usvg::ImageHrefResolver::default_data_resolver();
 	usvg::ImageHrefResolver{
-		resolve_data:usvg::ImageHrefResolver::default_data_resolver(),
+		resolve_data:Box::new(move|mime,data,opts|{
+			// Only the declared dimensions are read here; unprobeable
+			// payloads fall through and are rejected by resvg if invalid.
+			if let Some((w,h))=crate::img::probe_dimensions(&data[..]){
+				if !crate::img::dimensions_allowed_for(max_decode_pixels,w as u64,h as u64){
+					return None;
+				}
+			}
+			resolve_data(mime,data,opts)
+		}),
 		resolve_string:Box::new(|_,_|None),
 	}
 }
@@ -19,7 +31,7 @@ fn image_href_resolver() -> usvg::ImageHrefResolver<'static> {
 pub(crate) fn render_svg(src_bytes:&[u8],fontdb:Arc<usvg::fontdb::Database>,size_hint:(u32,u32),max_decode_pixels:u64)->Result<DynamicImage,()>{
 	let mut options=usvg::Options{
 		fontdb:fontdb.clone(),
-		image_href_resolver:image_href_resolver(),
+		image_href_resolver:image_href_resolver(max_decode_pixels),
 		..Default::default()
 	};
 	for f in fontdb.faces(){
