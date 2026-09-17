@@ -26,6 +26,10 @@ use crate::ConfigFile;
 const DNS_CACHE_TTL:Duration=Duration::from_secs(60);
 const DNS_CACHE_NEGATIVE_TTL:Duration=Duration::from_secs(10);
 const DNS_CACHE_CAP:usize=1024;
+/// Upper bound on a single resolution. Without it a blackholed resolver
+/// (attacker authoritative NS or broken local resolver) blocks the caller
+/// for the OS retry window while holding a `FETCH_SEMAPHORE` permit (M-03).
+const DNS_LOOKUP_TIMEOUT:Duration=Duration::from_secs(3);
 
 enum DnsEntry{
 	Positive{addrs:Vec<SocketAddr>,expires:Instant},
@@ -59,8 +63,9 @@ pub(crate) async fn cached_lookup_host(host:&str)->std::io::Result<Vec<SocketAdd
 			return result;
 		}
 	}
-	match tokio::net::lookup_host(format!("{}:0",host)).await{
-		Ok(resolved)=>{
+	let lookup=tokio::time::timeout(DNS_LOOKUP_TIMEOUT,tokio::net::lookup_host(format!("{}:0",host))).await;
+	match lookup{
+		Ok(Ok(resolved))=>{
 			let addrs:Vec<SocketAddr>=resolved.collect();
 			let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
 			if addrs.is_empty(){
@@ -71,10 +76,18 @@ pub(crate) async fn cached_lookup_host(host:&str)->std::io::Result<Vec<SocketAdd
 			}
 			Ok(addrs)
 		},
-		Err(e)=>{
+		Ok(Err(e))=>{
 			let kind=e.kind();
 			let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
 			cache.put(key,DnsEntry::Negative{kind,expires:Instant::now()+DNS_CACHE_NEGATIVE_TTL});
+			Err(e)
+		},
+		Err(_elapsed)=>{
+			// Cache the timeout as a negative entry so repeat requests to the
+			// same host do not each wait again.
+			let e=std::io::Error::new(std::io::ErrorKind::TimedOut,"dns lookup timeout");
+			let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
+			cache.put(key,DnsEntry::Negative{kind:e.kind(),expires:Instant::now()+DNS_CACHE_NEGATIVE_TTL});
 			Err(e)
 		},
 	}

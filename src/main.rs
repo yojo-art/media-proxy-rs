@@ -221,15 +221,6 @@ async fn get_file(
 	axum::extract::Query(q):axum::extract::Query<RequestParams>,
 )->Result<(axum::http::StatusCode,HeaderMap,axum::body::Body),axum::response::Response>{
 	let mut headers=HeaderMap::new();
-	// Bound concurrent work (finding #6). The permit is held for the whole
-	// request (fetch + encode) so memory/CPU budgets cannot be stacked.
-	let _permit=match FETCH_SEMAPHORE.acquire().await{
-		Ok(permit)=>permit,
-		Err(_)=>{
-			headers.append("X-Proxy-Error","Overloaded".parse().unwrap());
-			return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE,headers).into_response());
-		}
-	};
 	// q.url uses {:?} so percent-decoded CR/LF cannot forge log lines (finding #8).
 	println!("{}\t{:?}\tavatar:{:?}\tpreview:{:?}\tbadge:{:?}\temoji:{:?}\tstatic:{:?}\tfallback:{:?}",
 		chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -260,6 +251,16 @@ async fn get_file(
 	};
 
 	println!("check_url {}ms",(chrono::Utc::now()-time).num_milliseconds());
+	// Bound concurrent work (finding #6). The permit is acquired only after
+	// URL validation so DNS resolution cannot occupy every permit (M-03) and
+	// is held through fetch+encode so memory/CPU budgets cannot be stacked.
+	let _permit=match FETCH_SEMAPHORE.acquire().await{
+		Ok(permit)=>permit,
+		Err(_)=>{
+			headers.append("X-Proxy-Error","Overloaded".parse().unwrap());
+			return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE,headers).into_response());
+		}
+	};
 	// NOTE: DNS rebinding (TOCTOU between check_url and connect) remains a residual
 	// risk: check_url and reqwest resolve the host independently. Redirects are at
 	// least re-validated hop by hop below; full pinning (resolve + connect to the
