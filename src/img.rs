@@ -30,18 +30,36 @@ fn le24(b:&[u8])->u32{
 	(b[0] as u32)|((b[1] as u32)<<8)|((b[2] as u32)<<16)
 }
 
-/// RIFF/WebP animation pre-scan (M-02). The forked `AnimDecoder` materializes
-/// every frame before `FRAMES_LIMIT` is applied, so a few-hundred-KiB file can
-/// expand to gigabytes. Walk the container and reject oversized animations
-/// (frame count and cumulative declared frame pixels) before decoding.
+/// Shared animation frame cap. Enforced in three independent places
+/// (`webp_animation_within_budget`'s pre-scan, `encode_img`'s in-loop
+/// defense-in-depth, and `encode_anim`'s frame-collection loop) that must
+/// agree on the same policy value (code-review finding: was three separate
+/// literals/consts that could drift).
+pub(crate) const ANIMATION_FRAMES_LIMIT:u64=1000;
+
+/// RIFF/WebP animation pre-scan (M-02). Walk the container and reject
+/// oversized animations (frame count and cumulative per-frame pixels) before
+/// decoding.
+///
+/// The forked `AnimDecoder` materializes every frame before
+/// `ANIMATION_FRAMES_LIMIT` is applied in `encode_img`'s loop, so a
+/// few-hundred-KiB file can expand to gigabytes. Crucially, each frame it
+/// returns is a *full VP8X-canvas-sized* buffer (`WebPAnimDecoderGetNext`
+/// always hands back the fully composited canvas), regardless of that
+/// frame's own declared ANMF sub-rectangle -- a spec-legal partial update can
+/// declare a 1x1 rectangle while the decoder still allocates a full-canvas
+/// buffer for it. So the budget below is `frames * canvas_pixels`, not a sum
+/// of ANMF sub-rectangle areas (code-review finding: the previous version
+/// summed sub-rectangle areas, which a crafted file could keep near zero
+/// while still declaring thousands of frames against a large canvas,
+/// defeating this check entirely).
 fn webp_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
-	const FRAMES_LIMIT:u64=1000;
 	if data.len()<12||&data[0..4]!=b"RIFF"||&data[8..12]!=b"WEBP"{
 		return Ok(());
 	}
 	let mut off=12usize;
+	let mut canvas_pixels:Option<u64>=None;
 	let mut frames=0u64;
-	let mut pixels=0u64;
 	while off+8<=data.len(){
 		let fourcc=&data[off..off+4];
 		let size=u32::from_le_bytes([data[off+4],data[off+5],data[off+6],data[off+7]]) as usize;
@@ -49,16 +67,24 @@ fn webp_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),Str
 		if body.checked_add(size).map_or(true,|end|end>data.len()){
 			break;
 		}
+		if fourcc==b"VP8X"&&size>=10{
+			// Canvas Width/Height Minus One, 24-bit LE, at payload offsets 4 and 7.
+			let w=1u64+le24(&data[body+4..body+7]) as u64;
+			let h=1u64+le24(&data[body+7..body+10]) as u64;
+			canvas_pixels=Some(w.saturating_mul(h));
+		}
 		if fourcc==b"ANMF"&&size>=16{
-			let w=1+le24(&data[body+6..body+9]);
-			let h=1+le24(&data[body+9..body+12]);
 			frames+=1;
-			pixels=pixels.saturating_add((w as u64).saturating_mul(h as u64));
-			if frames>FRAMES_LIMIT{
-				return Err(format!("FramesLimit {}>{}",frames,FRAMES_LIMIT));
+			if frames>ANIMATION_FRAMES_LIMIT{
+				return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
 			}
-			if pixels>max_decode_pixels{
-				return Err(format!("DecodePixels {}>{}",pixels,max_decode_pixels));
+			// VP8X must precede ANMF per the container spec; if it is somehow
+			// missing, fail closed (treat the per-frame cost as unbounded)
+			// rather than silently allowing an unmeasured animation through.
+			let per_frame=canvas_pixels.unwrap_or(u64::MAX);
+			let total=per_frame.saturating_mul(frames);
+			if total>max_decode_pixels{
+				return Err(format!("DecodePixels {}>{}",total,max_decode_pixels));
 			}
 		}
 		off=body+size+(size&1);
@@ -293,9 +319,9 @@ impl RequestContext{
 					for frame in dec.into_iter(){
 						// Defense in depth if the container pre-scan could not
 						// parse the file (M-02).
-						if frames.len()>=1000{
+						if frames.len()>=ANIMATION_FRAMES_LIMIT as usize{
 							let mut headers=self.headers.clone();
-							headers.append("X-Proxy-Error","FramesLimit 1000".parse().unwrap());
+							headers.append("X-Proxy-Error",format!("FramesLimit {}",ANIMATION_FRAMES_LIMIT).parse().unwrap());
 							return (axum::http::StatusCode::BAD_GATEWAY,headers).into_response();
 						}
 						let img=if frame.get_layout().is_alpha() {
@@ -345,7 +371,7 @@ impl RequestContext{
 		let mut err=None;
 		{
 			let mut timestamp=0;
-			const FRAMES_LIMIT:u32=1000;
+			const FRAMES_LIMIT:u32=ANIMATION_FRAMES_LIMIT as u32;
 			let mut allow_frames=FRAMES_LIMIT;
 			for frame in frames{
 				allow_frames-=1;
