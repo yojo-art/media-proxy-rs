@@ -478,7 +478,15 @@ impl RequestContext{
 		}
 		if is_svg{
 			self.load_all(resp).await?;
-			if let Ok(img)=self.encode_svg(self.fontdb.clone()){
+			// SVG parsing/rendering is CPU-bound and attacker-controlled:
+			// run it on the blocking pool with a deadline so it cannot
+			// occupy a tokio worker or the semaphore indefinitely (H-01).
+			let src_bytes=std::mem::take(&mut self.src_bytes);
+			let fontdb=self.fontdb.clone();
+			let size_hint=self.image_size_hint();
+			let max_decode_pixels=self.max_decode_pixels();
+			let timeout_ms=self.config.timeout;
+			if let Ok(img)=crate::svg::render_svg_blocking(src_bytes,fontdb,size_hint,max_decode_pixels,timeout_ms).await{
 				self.headers.remove("Content-Length");
 				self.headers.remove("Content-Range");
 				self.headers.remove("Accept-Ranges");
