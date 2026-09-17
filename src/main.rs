@@ -167,7 +167,15 @@ fn main() {
 	let rt=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 	let client=reqwest::ClientBuilder::new();
 	let client=match &config.proxy{
-		Some(url)=>client.proxy(reqwest::Proxy::http(url).unwrap()),
+		Some(url)=>{
+			// See ssrf.rs module doc "Caveat": with an egress proxy configured, the
+			// proxy resolves and connects to the target, so ValidatingResolver's
+			// connect-time SSRF re-validation (DNS-rebinding protection) does not
+			// apply to fetch targets in this mode. Only check_url's independent
+			// pre-check protects proxied requests.
+			eprintln!("WARNING: proxy is configured ({}). Connect-time SSRF re-validation (DNS-rebinding protection) does not apply to fetch targets in this mode; ensure the proxy itself enforces an equivalent SSRF policy.",url);
+			client.proxy(reqwest::Proxy::http(url).unwrap())
+		},
 		None=>client,
 	};
 	// Do NOT follow redirects automatically: each redirect target must pass

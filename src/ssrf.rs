@@ -11,6 +11,17 @@
 //! `reqwest::dns::Resolve` implementation for every hostname connect (IP
 //! literals skip DNS entirely, so they cannot be rebound), which makes the
 //! pre-check vs connect resolutions a non-issue.
+//!
+//! Caveat: this guarantee holds only when reqwest connects directly to the
+//! target. When `config.proxy` is set, reqwest instead sends the request to
+//! the configured HTTP proxy, and the *proxy* — not this process — resolves
+//! and connects to the target host. `ValidatingResolver::resolve` is then
+//! only ever called with the proxy's own hostname (see the `proxy_host`
+//! guard below), so the target's addresses are never validated here, and the
+//! rebinding TOCTOU this module otherwise closes reopens for proxied
+//! deployments. In that configuration only `check_url`'s independent
+//! pre-check applies to the target; operators enabling `proxy` must ensure
+//! the proxy itself enforces an equivalent SSRF policy.
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -292,6 +303,9 @@ impl reqwest::dns::Resolve for ValidatingResolver{
 		let proxy_host=self.proxy_host.clone();
 		Box::pin(async move{
 			// The egress proxy itself is not a fetch target: resolve plainly.
+			// NB: this is also exactly where the module's connect-time SSRF
+			// guarantee stops covering the real target when a proxy is
+			// configured -- see the module doc's "Caveat" section above.
 			if let Some(proxy_host)=proxy_host.as_ref(){
 				if normalize_host(&host)==*proxy_host{
 					let ips:Vec<SocketAddr>=cached_lookup_host(&host).await
