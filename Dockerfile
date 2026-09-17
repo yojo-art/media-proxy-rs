@@ -44,7 +44,7 @@ WORKDIR /media-proxy-rs
 USER proxy
 COPY --from=build_app /app/media-proxy-rs ./media-proxy-rs
 COPY --from=build_app /app/healthcheck ./healthcheck
-RUN sh -c "./media-proxy-rs&" && ./healthcheck 12887 http://127.0.0.1:12766/test.webp
-HEALTHCHECK --interval=30s --timeout=3s CMD ./healthcheck 5555 http://127.0.0.1:12766/test.webp || exit 1
+RUN sh -c "./media-proxy-rs&" && ./healthcheck http://127.0.0.1:12766/healthz
+HEALTHCHECK --interval=30s --timeout=3s CMD ./healthcheck http://127.0.0.1:12766/healthz || exit 1
 EXPOSE 12766
 CMD ["./media-proxy-rs"]

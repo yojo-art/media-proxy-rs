@@ -204,6 +204,11 @@ fn main() {
 		let http_addr:SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
 		let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
 		let app = Router::new();
+		// Liveness probe that never touches the fetch path: the SSRF policy
+		// denies loopback by default, so a self-check going through get_file
+		// can never succeed (Docker build-time check and HEALTHCHECK both
+		// target 127.0.0.1).
+		let app=app.route("/healthz",axum::routing::get(||async{(axum::http::StatusCode::OK,"ok")}));
 		let arg_tup0=arg_tup.clone();
 		let app=app.route("/",axum::routing::get(move|headers,parms|get_file(None,headers,arg_tup0.clone(),parms)));
 		let app=app.route("/{*path}",axum::routing::get(move|path,headers,parms|get_file(Some(path),headers,arg_tup.clone(),parms)));
