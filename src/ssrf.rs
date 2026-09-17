@@ -36,11 +36,28 @@ use crate::ConfigFile;
 /// 反復クエリで DNS を叩き続けられないようにする。
 const DNS_CACHE_TTL:Duration=Duration::from_secs(60);
 const DNS_CACHE_NEGATIVE_TTL:Duration=Duration::from_secs(10);
+/// TTL for a *timeout* result specifically (shorter than
+/// `DNS_CACHE_NEGATIVE_TTL`). Code-review finding: a lookup that merely timed
+/// out once (transient resolver slowness) previously got the same 10s
+/// negative-cache treatment as a genuine resolution failure (NXDOMAIN etc.),
+/// so a single slow response could make a perfectly reachable host look
+/// "blocked"/unresolvable to every request for the next 10 seconds.
+const DNS_CACHE_TIMEOUT_NEGATIVE_TTL:Duration=Duration::from_secs(2);
 const DNS_CACHE_CAP:usize=1024;
 /// Upper bound on a single resolution. Without it a blackholed resolver
 /// (attacker authoritative NS or broken local resolver) blocks the caller
 /// for the OS retry window while holding a `FETCH_SEMAPHORE` permit (M-03).
 const DNS_LOOKUP_TIMEOUT:Duration=Duration::from_secs(3);
+/// Bounds concurrent blocking-pool DNS lookups independently of
+/// `FETCH_SEMAPHORE`. Code-review finding: `cached_lookup_host` is called
+/// both by `check_url` (which now runs *before* `FETCH_SEMAPHORE` is
+/// acquired, M-03) and by `ValidatingResolver`; each underlying
+/// `tokio::net::lookup_host` occupies a blocking-pool thread for up to
+/// `DNS_LOOKUP_TIMEOUT`, so without a separate cap here, many concurrent
+/// requests to distinct slow-to-resolve hosts could occupy an unbounded
+/// number of blocking-pool threads (shared with SVG/image encoding) before
+/// ever touching the 32-permit `FETCH_SEMAPHORE`.
+const DNS_LOOKUP_CONCURRENCY:usize=128;
 
 enum DnsEntry{
 	Positive{addrs:Vec<SocketAddr>,expires:Instant},
@@ -49,6 +66,10 @@ enum DnsEntry{
 
 static DNS_CACHE:LazyLock<Mutex<lru::LruCache<String,DnsEntry>>>=LazyLock::new(||{
 	Mutex::new(lru::LruCache::new(NonZeroUsize::new(DNS_CACHE_CAP).unwrap()))
+});
+
+static DNS_LOOKUP_SEMAPHORE:LazyLock<tokio::sync::Semaphore>=LazyLock::new(||{
+	tokio::sync::Semaphore::new(DNS_LOOKUP_CONCURRENCY)
 });
 
 /// ホスト名→アドレスの簡易 LRU キャッシュ付き解決。check_url と
@@ -74,6 +95,12 @@ pub(crate) async fn cached_lookup_host(host:&str)->std::io::Result<Vec<SocketAdd
 			return result;
 		}
 	}
+	let _dns_permit=match DNS_LOOKUP_SEMAPHORE.acquire().await{
+		Ok(permit)=>permit,
+		// Never actually closed; fail closed rather than unwrap on principle
+		// (finding #3).
+		Err(_)=>return Err(std::io::Error::new(std::io::ErrorKind::Other,"dns semaphore closed")),
+	};
 	let lookup=tokio::time::timeout(DNS_LOOKUP_TIMEOUT,tokio::net::lookup_host(format!("{}:0",host))).await;
 	match lookup{
 		Ok(Ok(resolved))=>{
@@ -95,10 +122,12 @@ pub(crate) async fn cached_lookup_host(host:&str)->std::io::Result<Vec<SocketAdd
 		},
 		Err(_elapsed)=>{
 			// Cache the timeout as a negative entry so repeat requests to the
-			// same host do not each wait again.
+			// same host do not each wait again -- but only briefly: a timeout
+			// means "slow this time", not "does not exist", so it gets a
+			// shorter TTL than a genuine resolution failure above.
 			let e=std::io::Error::new(std::io::ErrorKind::TimedOut,"dns lookup timeout");
 			let mut cache=DNS_CACHE.lock().unwrap_or_else(|e|e.into_inner());
-			cache.put(key,DnsEntry::Negative{kind:e.kind(),expires:Instant::now()+DNS_CACHE_NEGATIVE_TTL});
+			cache.put(key,DnsEntry::Negative{kind:e.kind(),expires:Instant::now()+DNS_CACHE_TIMEOUT_NEGATIVE_TTL});
 			Err(e)
 		},
 	}
@@ -285,10 +314,27 @@ pub(crate) struct ValidatingResolver{
 	proxy_host:Option<String>,
 }
 
+/// Parses a `config.proxy` string the same permissive way reqwest's own
+/// `Proxy::http`/`Proxy::all` do internally (their crate-private `IntoProxy`
+/// retries with an `http://` prefix when the string has no scheme).
+///
+/// Code-review finding: a bare `reqwest::Url::parse` (as this used to be)
+/// fails outright on a schemeless value like `"10.0.0.5:3128"` -- a natural
+/// way to write it -- while `reqwest::Proxy::http`/`Proxy::all` still accept
+/// it via that fallback. If `proxy_host` derivation disagreed with what the
+/// client actually proxies through, the "proxy's own hostname" bypass branch
+/// in `ValidatingResolver::resolve` would never trigger, and the proxy's own
+/// (often RFC1918) address would run through the normal SSRF check instead
+/// and get rejected as "Blocked address", silently breaking every proxied
+/// fetch with no indication the root cause was the missing scheme.
+fn parse_proxy_url(url:&str)->Option<reqwest::Url>{
+	reqwest::Url::parse(url).ok().or_else(||reqwest::Url::parse(&format!("http://{}",url)).ok())
+}
+
 impl ValidatingResolver{
 	pub(crate) fn new(config:Arc<ConfigFile>)->Self{
 		let proxy_host=config.proxy.as_ref()
-			.and_then(|url|reqwest::Url::parse(url).ok())
+			.and_then(|url|parse_proxy_url(url))
 			.and_then(|u|u.host_str().map(|h|normalize_host(h)));
 		Self{config,proxy_host}
 	}
@@ -489,6 +535,33 @@ mod tests{
 		rt.block_on(async{
 			let name:reqwest::dns::Name="localhost".parse().unwrap();
 			assert!(r.resolve(name).await.is_err());
+		});
+	}
+
+	#[test]
+	fn proxy_url_accepts_schemeless_value(){
+		// Mirrors reqwest::Proxy::http/all's own fallback (code-review finding)
+		// so ValidatingResolver's proxy_host agrees with what the client
+		// actually proxies through.
+		let u=parse_proxy_url("10.0.0.5:3128").expect("schemeless proxy value should parse");
+		assert_eq!(u.host_str(),Some("10.0.0.5"));
+		let u=parse_proxy_url("http://10.0.0.5:3128").expect("explicit scheme should still parse");
+		assert_eq!(u.host_str(),Some("10.0.0.5"));
+	}
+
+	#[test]
+	fn resolver_treats_schemeless_proxy_host_as_proxy(){
+		// 127.0.0.1 would otherwise be blocked by the default-deny list;
+		// this only passes if the schemeless proxy value is recognized as
+		// the proxy's own host (code-review finding).
+		let mut c=test_config();
+		c.proxy=Some("127.0.0.1:1".to_owned());
+		let config=Arc::new(c);
+		let r=ValidatingResolver::new(config);
+		let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+		rt.block_on(async{
+			let name:reqwest::dns::Name="127.0.0.1".parse().unwrap();
+			assert!(r.resolve(name).await.is_ok());
 		});
 	}
 }
