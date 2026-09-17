@@ -305,8 +305,19 @@ async fn get_file(
 		let next=base.join(&location).map_err(|e|{
 			(axum::http::StatusCode::BAD_REQUEST,headers.clone(),format!("{:?}",e)).into_response()
 		}).map_err(axum::response::Response::from)?;
-		// Drain the redirect body so the connection can be reused.
-		let _=resp.bytes().await;
+		// Drain only a bounded prefix of the redirect body (H-02). Reading
+		// the whole body with `resp.bytes()` let an attacker buffer gigabytes
+		// per hop (no max_size check applies here).
+		const MAX_REDIRECT_DRAIN:usize=64*1024;
+		let mut stream=resp.bytes_stream();
+		let mut drained=0usize;
+		while let Some(Ok(chunk))=stream.next().await{
+			drained+=chunk.len();
+			if drained>=MAX_REDIRECT_DRAIN{
+				break;
+			}
+		}
+		drop(stream);
 		let next_str=next.to_string();
 		if let Err(s)=check_url(&config,&next_str).await{
 			if let Ok(v)=s.parse(){
