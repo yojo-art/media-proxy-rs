@@ -156,6 +156,12 @@ fn main() {
 		}
 		config.blocked_hosts.replace(blocked_hosts);
 	}
+	// A bad CIDR must stop startup with a clear message (M-05), not turn into
+	// a panic on every request.
+	if let Err(e)=crate::ssrf::validate_network_config(&config){
+		eprintln!("invalid network configuration: {}",e);
+		std::process::exit(1);
+	}
 	let dummy_png=Arc::new(include_bytes!("../asset/dummy.png").to_vec());
 	let config=Arc::new(config);
 	let rt=tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();

@@ -117,7 +117,8 @@ pub(crate) fn is_host_blocked(blocked_hosts:Option<&Vec<String>>,host:&str)->boo
 
 fn ipv4_blocked_default()->iprange::IpRange<ipnet::Ipv4Net>{
 	// Default-deny list. Covers RFC1918 + loopback/link-local/metadata
-	// (CGNAT/shared)/"this host". See finding #1.
+	// (CGNAT/shared)/"this host" (finding #1), plus non-routable/special-use
+	// ranges that are still sometimes routed internally (M-04).
 	[
 		"10.0.0.0/8",
 		"172.16.0.0/12",
@@ -126,16 +127,74 @@ fn ipv4_blocked_default()->iprange::IpRange<ipnet::Ipv4Net>{
 		"169.254.0.0/16",
 		"100.64.0.0/10",
 		"0.0.0.0/8",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"224.0.0.0/4",
+		"240.0.0.0/4",
 	]
 		.iter()
-		.map(|s| s.parse().unwrap())
+		.map(|s| s.parse().expect("static CIDR"))
 		.collect()
 }
 
+/// Operator-configured CIDRs are validated once at startup
+/// ([`validate_network_config`]); at request time invalid entries are ignored
+/// instead of panicking (M-05).
 fn parse_v4_nets(nets:&Vec<String>)->iprange::IpRange<ipnet::Ipv4Net>{
 	nets.iter()
-	.map(|s| s.parse().unwrap())
+	.filter_map(|s| s.parse().ok())
 	.collect()
+}
+
+/// IPv6 counterpart of [`parse_v4_nets`]; honored for `blocked_networks`
+/// (M-04) as well as for operator allow-overrides.
+fn parse_v6_nets(nets:&Vec<String>)->iprange::IpRange<ipnet::Ipv6Net>{
+	nets.iter()
+	.filter_map(|s| s.parse().ok())
+	.collect()
+}
+
+/// Fails fast on a bad `blocked_networks` / `allowed_networks` entry so a
+/// typo (or an IPv6 CIDR in a historically IPv4-only field, M-05) is a
+/// startup error instead of a per-request panic.
+pub(crate) fn validate_network_config(config:&ConfigFile)->Result<(),String>{
+	for (field,nets) in [("blocked_networks",&config.blocked_networks),("allowed_networks",&config.allowed_networks)]{
+		if let Some(nets)=nets{
+			for net in nets{
+				if net.parse::<ipnet::IpNet>().is_err(){
+					return Err(format!("{}: invalid CIDR {:?}",field,net));
+				}
+			}
+		}
+	}
+	Ok(())
+}
+
+/// Extracts the IPv4 address carried by IPv6 transition/translation formats
+/// so they cannot bypass the IPv4 policy (M-04):
+/// IPv4-mapped/-compatible, IPv4-translated, NAT64 (64:ff9b::/96) and
+/// 6to4 (2002::/16). Teredo is handled separately (always refused).
+fn v6_to_ipv4(v6:&std::net::Ipv6Addr)->Option<std::net::Ipv4Addr>{
+	if let Some(v4)=v6.to_ipv4(){
+		return Some(v4);
+	}
+	let seg=v6.segments();
+	// NAT64 well-known prefix 64:ff9b::/96
+	if seg[0]==0x0064&&seg[1]==0xff9b&&seg[2]==0&&seg[3]==0&&seg[4]==0&&seg[5]==0{
+		return Some(std::net::Ipv4Addr::new((seg[6]>>8) as u8,(seg[6]&0xff) as u8,(seg[7]>>8) as u8,(seg[7]&0xff) as u8));
+	}
+	// 6to4 2002::/16: next 32 bits hold the IPv4 address.
+	if seg[0]==0x2002{
+		return Some(std::net::Ipv4Addr::new((seg[1]>>8) as u8,(seg[1]&0xff) as u8,(seg[2]>>8) as u8,(seg[2]&0xff) as u8));
+	}
+	// IPv4-translated ::ffff:0:0:0/96
+	if seg[0]==0&&seg[1]==0&&seg[2]==0&&seg[3]==0&&seg[4]==0xffff&&seg[5]==0{
+		return Some(std::net::Ipv4Addr::new((seg[6]>>8) as u8,(seg[6]&0xff) as u8,(seg[7]>>8) as u8,(seg[7]&0xff) as u8));
+	}
+	None
 }
 
 /// True when a single resolved IP must be refused.
@@ -158,14 +217,32 @@ pub(crate) fn is_ip_blocked(config:&ConfigFile,ip:IpAddr)->bool{
 			false
 		},
 		IpAddr::V6(v6)=>{
-			// Loopback ::1 / unspecified :: / ULA fc00::/7 have no allow-override;
-			// operator allow-lists are IPv4-only (allowed_networks: Vec<Ipv4Net>).
-			if v6.is_multicast()||v6.is_unicast_link_local()||v6.is_loopback()||v6.is_unspecified()||v6.is_unique_local(){
+			// Operator block list is honored for IPv6 too (M-04).
+			if let Some(blocked)=config.blocked_networks.as_ref(){
+				if parse_v6_nets(blocked).contains(&v6){
+					return true;
+				}
+			}
+			// Teredo (2001:0000::/32) can carry an IPv4 address and is never
+			// legitimate for this proxy; refuse it unconditionally (M-04).
+			let seg=v6.segments();
+			if seg[0]==0x2001&&seg[1]==0x0000{
 				return true;
 			}
-			// IPv4-mapped (e.g. ::ffff:169.254.169.254): apply the IPv4 policy.
-			if let Some(mapped)=v6.to_ipv4_mapped(){
-				return is_ip_blocked(config,IpAddr::V4(mapped));
+			// IPv4-mapped/-compatible/-translated, NAT64, 6to4: apply the
+			// IPv4 policy (M-04).
+			if let Some(v4)=v6_to_ipv4(&v6){
+				return is_ip_blocked(config,IpAddr::V4(v4));
+			}
+			// Loopback ::1 / unspecified :: / ULA fc00::/7 have an
+			// `allowed_networks` override, mirroring the IPv4 policy.
+			if v6.is_multicast()||v6.is_unicast_link_local()||v6.is_loopback()||v6.is_unspecified()||v6.is_unique_local(){
+				if let Some(allowed)=config.allowed_networks.as_ref(){
+					if parse_v6_nets(allowed).contains(&v6){
+						return false;
+					}
+				}
+				return true;
 			}
 			false
 		},
@@ -308,6 +385,35 @@ mod tests{
 		c.blocked_networks=Some(vec!["8.8.8.0/24".to_owned()]);
 		assert!(is_ip_blocked(&c,v4("8.8.8.8")));
 		assert!(!is_ip_blocked(&c,v4("1.1.1.1")));
+	}
+
+	#[test]
+	fn ipv6_transition_ranges_are_blocked(){
+		let c=test_config();
+		// NAT64 / 6to4 / Teredo / IPv4-translated must not bypass the IPv4 policy.
+		for ip in ["64:ff9b::7f00:1","64:ff9b::a9fe:a9fe","2002:7f00:1::","2002:a9fe:a9fe::","2001::1","::ffff:0:7f00:1"]{
+			assert!(is_ip_blocked(&c,v6(ip)),"{} should be blocked",ip);
+		}
+		// 6to4 wrapping a public IPv4 (8.8.8.8) stays allowed.
+		assert!(!is_ip_blocked(&c,v6("2002:808:808::")),"6to4 of 8.8.8.8 should pass");
+	}
+
+	#[test]
+	fn ipv6_block_list_is_honored(){
+		let mut c=test_config();
+		c.blocked_networks=Some(vec!["2606:4700:4700::/48".to_owned()]);
+		assert!(is_ip_blocked(&c,v6("2606:4700:4700::1111")));
+		assert!(!is_ip_blocked(&c,v6("2606:1111::1")));
+	}
+
+	#[test]
+	fn invalid_network_config_is_rejected_at_startup(){
+		let mut c=test_config();
+		c.blocked_networks=Some(vec!["10.0.0.0/99".to_owned()]);
+		assert!(validate_network_config(&c).is_err());
+		// IPv6 CIDRs are now valid policy entries (M-04), not a panic (M-05).
+		c.blocked_networks=Some(vec!["2001:db8::/32".to_owned()]);
+		assert!(validate_network_config(&c).is_ok());
 	}
 
 	#[test]
