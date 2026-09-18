@@ -183,11 +183,10 @@ impl RequestContext{
 			Err(e) => {
 				match self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes())){
 				Some(Ok("image/jxl"))=>{
-					// Animated and still JPEG XL share one path; `encode_jxl`
-					// decides which based on the animation header and the number
-					// of loaded keyframes (jxl-oxide's `image` integration does
-					// not decode animation, so the low-level `JxlImage` API is
-					// used here instead of `JxlDecoder`).
+					// 静止画・動画のJPEG XLは `encode_jxl` に一本化する。
+					// アニメヘッダと読み込み済みキーフレーム数で静止画か動画かを判定する
+					//（jxl-oxideの `image` 統合はアニメをデコードできないため、
+					// `JxlDecoder` の代わりに低レベルAPIの `JxlImage` を使う）。
 					return self.encode_jxl();
 				}
 				Some(Ok("image/jp2"))=>{
@@ -345,16 +344,16 @@ impl RequestContext{
 			},
 		}
 	}
-	/// Decode + re-encode JPEG XL, handling both still and animated files.
+	/// 静止画・動画のJPEG XLをデコードして再エンコードする。
 	///
-	/// jxl-oxide's `image`-crate integration (`JxlDecoder`) only ever renders
-	/// keyframe 0, so animation cannot be produced through it. Instead the
-	/// low-level `JxlImage` API is used: `read` parses the whole codestream
-	/// (bounded by `max_size`, since it only stores compressed groups and frame
-	/// headers -- no full-canvas buffers are allocated until `render_frame`),
-	/// the canvas dimensions / frame count / cumulative-pixel budget are gated
-	/// first, and only then is each keyframe rendered and fed to `encode_anim`
-	/// (the same animated-WebP sink used for APNG/GIF/WebP).
+	/// jxl-oxideの `image` クレート統合（`JxlDecoder`）はキーフレーム0しか
+	/// 描画しないためアニメは作れない。代わりに低レベルAPIの `JxlImage`
+	/// を使う。`read` はコードストリーム全体をパースするが、保持するのは
+	/// 圧縮グループとフレームヘッダのみで `max_size` 以内に収まる
+	///（`render_frame` まではフルキャンバスのバッファを確保しない）。
+	/// 先にキャンバス寸法・フレーム数・累積ピクセル予算でゲートし、
+	/// その後各キーフレームを描画して `encode_anim` に渡す
+	///（APNG/GIF/WebPと同じアニメWebP出力先）。
 	fn encode_jxl(&mut self)->axum::response::Response{
 		let mut image=match jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(&self.src_bytes)){
 			Ok(image)=>image,
@@ -363,24 +362,23 @@ impl RequestContext{
 				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			},
 		};
-		// jxl-oxide does not color-manage CMYK itself; request sRGB so the 8-bit
-		// stream below yields RGB(A) rather than raw CMYK(A) samples.
+		// jxl-oxideはCMYKのカラーマネジメントをしないためsRGBを要求する。
+		// こうすると後段の8bitストリームは生CMYK(A)ではなくRGB(A)になる。
 		if image.pixel_format().has_black(){
 			image.request_color_encoding(jxl_oxide::EnumColourEncoding::srgb(jxl_oxide::RenderingIntent::Relative));
 		}
-		// Header-only gate before any keyframe is rendered (finding #4).
+		// キーフレーム描画前のヘッダのみによるゲート（finding #4）。
 		let (w,h)=(image.width(),image.height());
 		if !self.dimensions_allowed(w as u64,h as u64){
 			return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
 		}
 		let keyframes=image.num_loaded_keyframes();
-		// Only treat as animated when the container declares an animation and
-		// more than one keyframe was actually decoded.
+		// コンテナがアニメ宣言を持ち、かつ実際に2つ以上のキーフレームが
+		// デコードできた場合のみアニメとして扱う。
 		let animated=image.image_header().metadata.animation.is_some()&&keyframes>1;
-		// A truncated codestream still yields Ok from `read` with whatever
-		// keyframes were loaded; never treat that prefix as a complete
-		// animation (still images fail closed per-frame below, so only the
-		// animated branch needs this gate).
+		// 切詰めコードストリームでも `read` は読み込めた範囲でOkを返すため、
+		// そのprefixを完全なアニメとして扱わない（静止画は後段でフレーム毎に
+		// fail-closedするため、このゲートはアニメ分岐のみでよい）。
 		if animated&&!image.is_loading_done(){
 			self.headers.append("X-Proxy-Error","JpegXLTruncated".parse().unwrap());
 			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
@@ -402,10 +400,11 @@ impl RequestContext{
 			};
 			return self.response_img(img);
 		}
-		// Animation budget, mirroring the WebP pre-scan (M-02): frame count and
-		// frames*canvas_pixels must fit the same decode budget. `render_frame`
-		// hands back a full-canvas buffer per keyframe regardless of that frame's
-		// own extent, so the cost is frames*canvas_pixels, not a sum of sub-rects.
+		// WebP事前スキャン（M-02）に倣ったアニメ予算。フレーム数と
+		// frames*canvas_pixelsがデコード予算に収まること。`render_frame` は
+		// フレーム自体の範囲に関わらずキーフレーム毎にフルキャンバスの
+		// バッファを返すため、コストは部分矩形の合計ではなく
+		// frames*canvas_pixelsで見積もる。
 		let max_decode_pixels=self.max_decode_pixels();
 		let canvas_pixels=(w as u64).saturating_mul(h as u64);
 		let frame_count=keyframes as u64;
@@ -416,16 +415,16 @@ impl RequestContext{
 		if total>max_decode_pixels{
 			return self.decode_limit_response(format!("DecodePixels {}>{}",total,max_decode_pixels));
 		}
-		// TPS (ticks per second) = tps_numerator / tps_denominator, so
-		// ms = ticks * tps_denominator * 1000 / tps_numerator. tps_numerator is
-		// >=1 for a well-formed animation; guard against 0 anyway.
+		// TPS（ticks per second）= tps_numerator / tps_denominator なので
+		// ms = ticks * tps_denominator * 1000 / tps_numerator。正常なアニメなら
+		// tps_numeratorは1以上だが、0への念のためガードを入れる。
 		let anim=image.image_header().metadata.animation.as_ref().unwrap();
 		let tps_num=(anim.tps_numerator as u64).max(1);
 		let tps_den=anim.tps_denominator as u64;
 		let loop_count=anim.num_loops;
 		let mut collected:Vec<Result<image::Frame,image::ImageError>>=Vec::with_capacity(keyframes.min(ANIMATION_FRAMES_LIMIT as usize));
 		for keyframe in 0..keyframes{
-			// Defense in depth against the frame cap (M-02).
+			// フレーム上限に対する多重防御（M-02）。
 			if collected.len()>=ANIMATION_FRAMES_LIMIT as usize{
 				return self.decode_limit_response(format!("FramesLimit {}",ANIMATION_FRAMES_LIMIT));
 			}
@@ -694,20 +693,20 @@ fn jpegxr_img(width:u32,height:u32,stride:usize,buffer:Vec<u8>,info:jpegxr::Pixe
 	}
 }
 
-/// Build an `X-Proxy-Error` value from a jxl-oxide error.
+/// jxl-oxideのエラーから `X-Proxy-Error` 値を組み立てる。
 ///
-/// The `Debug` output derives from external bytes and may contain
-/// header-invalid characters, so never unwrap (finding #3).
+/// `Debug` 出力は外部由来バイトに基づくためヘッダ不正文字を含む場合が
+/// あり、unwrapしてはならない（finding #3）。
 fn jxl_error_value(e:impl std::fmt::Debug)->reqwest::header::HeaderValue{
 	reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"))
 }
 
-/// Convert one jxl-oxide `Render` into a `DynamicImage` of 8-bit samples.
+/// jxl-oxideの `Render` 1件を8bitサンプルの `DynamicImage` に変換する。
 ///
-/// The stream carries color + (optional) black + (optional) alpha channels,
-/// with orientation and the requested color encoding (sRGB for CMYK) applied.
-/// CMYK is converted upstream via `request_color_encoding`, so at most 4
-/// channels reach here; anything else is treated as unsupported.
+/// ストリームは色＋（任意で）black＋（任意で）alphaチャネルを持ち、
+/// orientationと要求した色エンコーディング（CMYK用にsRGB）を適用済み。
+/// CMYKは上流の `request_color_encoding` で変換済みのため、ここに届くのは
+/// 最大4チャネル。それ以外は未対応として扱う。
 fn jxl_render_to_image(render:&jxl_oxide::Render)->Option<DynamicImage>{
 	let mut stream=render.stream();
 	let width=stream.width();
