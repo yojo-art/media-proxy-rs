@@ -1,6 +1,6 @@
 
 use axum::response::IntoResponse;
-use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageDecoder};
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
 
 use crate::RequestContext;
 
@@ -183,32 +183,13 @@ impl RequestContext{
 			Err(e) => {
 				match self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes())){
 				Some(Ok("image/jxl"))=>{
-					let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes));
-					let decoder=match decoder{
-						Ok(decoder)=>decoder,
-						Err(e)=>{
-							// Debug output derives from external bytes and may contain
-							// header-invalid characters; never unwrap (finding #3).
-							let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
-							self.headers.append("X-Proxy-Error",value);
-							return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
-						},
-					};
-					// Header-only gate before pixel allocation (finding #4).
-					let (w,h)=decoder.dimensions();
-					if !self.dimensions_allowed(w as u64,h as u64){
-						return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
-					}
-					let img=DynamicImage::from_decoder(decoder).map_err(|e|e);
-						let img=match img{
-							Ok(img) => img,
-							Err(e) => {
-								self.headers.append("X-Proxy-Error",format!("JpegXL Error:{:?}",e).parse().unwrap());
-								return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
-							},
-						};
-						return self.response_img(img);
-					}
+					// Animated and still JPEG XL share one path; `encode_jxl`
+					// decides which based on the animation header and the number
+					// of loaded keyframes (jxl-oxide's `image` integration does
+					// not decode animation, so the low-level `JxlImage` API is
+					// used here instead of `JxlDecoder`).
+					return self.encode_jxl();
+				}
 				Some(Ok("image/jp2"))=>{
 					// Header-only gate before pixel allocation (finding #4).
 					// DumpImage::from_bytes parses headers via read_header without decoding pixels.
@@ -363,6 +344,105 @@ impl RequestContext{
 				self.encode_single()
 			},
 		}
+	}
+	/// Decode + re-encode JPEG XL, handling both still and animated files.
+	///
+	/// jxl-oxide's `image`-crate integration (`JxlDecoder`) only ever renders
+	/// keyframe 0, so animation cannot be produced through it. Instead the
+	/// low-level `JxlImage` API is used: `read` parses the whole codestream
+	/// (bounded by `max_size`, since it only stores compressed groups and frame
+	/// headers -- no full-canvas buffers are allocated until `render_frame`),
+	/// the canvas dimensions / frame count / cumulative-pixel budget are gated
+	/// first, and only then is each keyframe rendered and fed to `encode_anim`
+	/// (the same animated-WebP sink used for APNG/GIF/WebP).
+	fn encode_jxl(&mut self)->axum::response::Response{
+		let mut image=match jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(&self.src_bytes)){
+			Ok(image)=>image,
+			Err(e)=>{
+				// Debug output derives from external bytes and may contain
+				// header-invalid characters; never unwrap (finding #3).
+				let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
+				self.headers.append("X-Proxy-Error",value);
+				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+			},
+		};
+		// jxl-oxide does not color-manage CMYK itself; request sRGB so the 8-bit
+		// stream below yields RGB(A) rather than raw CMYK(A) samples.
+		if image.pixel_format().has_black(){
+			image.request_color_encoding(jxl_oxide::EnumColourEncoding::srgb(jxl_oxide::RenderingIntent::Relative));
+		}
+		// Header-only gate before any keyframe is rendered (finding #4).
+		let (w,h)=(image.width(),image.height());
+		if !self.dimensions_allowed(w as u64,h as u64){
+			return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
+		}
+		let keyframes=image.num_loaded_keyframes();
+		// Only treat as animated when the container declares an animation and
+		// more than one keyframe was actually decoded.
+		let animated=image.image_header().metadata.animation.is_some()&&keyframes>1;
+		if !animated{
+			let render=match image.render_frame(0){
+				Ok(render)=>render,
+				Err(e)=>{
+					let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
+					self.headers.append("X-Proxy-Error",value);
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
+			};
+			let img=match jxl_render_to_image(&render){
+				Some(img)=>img,
+				None=>{
+					self.headers.append("X-Proxy-Error","JpegXLUnsupportedPixelFormat".parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
+			};
+			return self.response_img(img);
+		}
+		// Animation budget, mirroring the WebP pre-scan (M-02): frame count and
+		// frames*canvas_pixels must fit the same decode budget. `render_frame`
+		// hands back a full-canvas buffer per keyframe regardless of that frame's
+		// own extent, so the cost is frames*canvas_pixels, not a sum of sub-rects.
+		let max_decode_pixels=self.max_decode_pixels();
+		let canvas_pixels=(w as u64).saturating_mul(h as u64);
+		let frame_count=keyframes as u64;
+		if frame_count>ANIMATION_FRAMES_LIMIT{
+			return self.decode_limit_response(format!("FramesLimit {}>{}",frame_count,ANIMATION_FRAMES_LIMIT));
+		}
+		let total=canvas_pixels.saturating_mul(frame_count);
+		if total>max_decode_pixels{
+			return self.decode_limit_response(format!("DecodePixels {}>{}",total,max_decode_pixels));
+		}
+		// TPS (ticks per second) = tps_numerator / tps_denominator, so
+		// ms = ticks * tps_denominator * 1000 / tps_numerator. tps_numerator is
+		// >=1 for a well-formed animation; guard against 0 anyway.
+		let anim=image.image_header().metadata.animation.as_ref().unwrap();
+		let tps_num=(anim.tps_numerator as u64).max(1);
+		let tps_den=anim.tps_denominator as u64;
+		let loop_count=anim.num_loops;
+		let mut collected:Vec<Result<image::Frame,image::ImageError>>=Vec::with_capacity(keyframes.min(ANIMATION_FRAMES_LIMIT as usize));
+		for keyframe in 0..keyframes{
+			// Defense in depth against the frame cap (M-02).
+			if collected.len()>=ANIMATION_FRAMES_LIMIT as usize{
+				return self.decode_limit_response(format!("FramesLimit {}",ANIMATION_FRAMES_LIMIT));
+			}
+			let render=match image.render_frame(keyframe){
+				Ok(render)=>render,
+				Err(_)=>break,
+			};
+			let img=match jxl_render_to_image(&render){
+				Some(img)=>img,
+				None=>break,
+			};
+			let dur_ms=(render.duration() as u64).saturating_mul(tps_den).saturating_mul(1000)/tps_num;
+			let delay=image::Delay::from_saturating_duration(std::time::Duration::from_millis(dur_ms));
+			collected.push(Ok(image::Frame::from_parts(img.into_rgba8(),0,0,delay)));
+		}
+		if collected.is_empty(){
+			self.headers.append("X-Proxy-Error","NoAvailableFrames".parse().unwrap());
+			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+		}
+		let frames=image::Frames::new(Box::new(collected.into_iter()));
+		self.encode_anim(frames,loop_count)
 	}
 	fn encode_anim(&self,frames:image::Frames,loop_count:u32)->axum::response::Response{
 		let conf=webp::WebPConfig::new().unwrap();
@@ -601,6 +681,29 @@ fn jpegxr_img(width:u32,height:u32,stride:usize,buffer:Vec<u8>,info:jpegxr::Pixe
 			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageRgba8(i))
 		},
 		_ => None,
+	}
+}
+
+/// Convert one jxl-oxide `Render` into a `DynamicImage` of 8-bit samples.
+///
+/// The stream carries color + (optional) black + (optional) alpha channels,
+/// with orientation and the requested color encoding (sRGB for CMYK) applied.
+/// CMYK is converted upstream via `request_color_encoding`, so at most 4
+/// channels reach here; anything else is treated as unsupported.
+fn jxl_render_to_image(render:&jxl_oxide::Render)->Option<DynamicImage>{
+	let mut stream=render.stream();
+	let width=stream.width();
+	let height=stream.height();
+	let channels=stream.channels() as usize;
+	let len=(width as usize).checked_mul(height as usize)?.checked_mul(channels)?;
+	let mut buf=vec![0u8;len];
+	stream.write_to_buffer(&mut buf);
+	match channels{
+		1=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageLuma8),
+		2=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageLumaA8),
+		3=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageRgb8),
+		4=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageRgba8),
+		_=>None,
 	}
 }
 
