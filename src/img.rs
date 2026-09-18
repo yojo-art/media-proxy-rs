@@ -94,6 +94,133 @@ fn webp_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<(
 	Ok(())
 }
 
+/// APNG pre-scan (frames*canvas_pixels budget, same rationale as
+/// `webp_animation_within_budget`): reject oversized animations using only
+/// the `IHDR`/`acTL` chunk headers, before the `image` crate decodes any
+/// frame data.
+fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
+	const SIG:[u8;8]=[137,80,78,71,13,10,26,10];
+	if !data.starts_with(&SIG){
+		return Ok(());
+	}
+	let mut off=8usize;
+	let mut canvas_pixels:Option<u64>=None;
+	while off+8<=data.len(){
+		let len=u32::from_be_bytes([data[off],data[off+1],data[off+2],data[off+3]]) as usize;
+		let ctype=&data[off+4..off+8];
+		let body=off+8;
+		// +4 for the trailing CRC.
+		let end=match body.checked_add(len).and_then(|e|e.checked_add(4)){
+			Some(end) if end<=data.len()=>end,
+			_=>break,
+		};
+		if ctype==b"IHDR"&&len>=8{
+			let w=u32::from_be_bytes([data[body],data[body+1],data[body+2],data[body+3]]) as u64;
+			let h=u32::from_be_bytes([data[body+4],data[body+5],data[body+6],data[body+7]]) as u64;
+			canvas_pixels=Some(w.saturating_mul(h));
+		}
+		if ctype==b"acTL"&&len>=4{
+			let frames=u32::from_be_bytes([data[body],data[body+1],data[body+2],data[body+3]]) as u64;
+			// acTL is required to precede IDAT/fdAT, so canvas_pixels (from
+			// the always-first IHDR) is already known here.
+			if frames>ANIMATION_FRAMES_LIMIT{
+				return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
+			}
+			let total=canvas_pixels.unwrap_or(u64::MAX).saturating_mul(frames);
+			if total>max_decode_pixels{
+				return Err(format!("DecodePixels {}>{}",total,max_decode_pixels));
+			}
+			return Ok(());
+		}
+		if ctype==b"IDAT"{
+			// No acTL before the first IDAT: not an animation we can budget
+			// this way; let the normal APNG/PNG decode path handle it.
+			break;
+		}
+		off=end;
+	}
+	Ok(())
+}
+
+/// GIF pre-scan (frames*canvas_pixels budget, same rationale as
+/// `webp_animation_within_budget`): GIF has no upfront frame count, so this
+/// walks the block structure (extensions and image descriptors) counting
+/// frames without decoding any pixel data.
+fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
+	if data.len()<13||!(data.starts_with(b"GIF87a")||data.starts_with(b"GIF89a")){
+		return Ok(());
+	}
+	let canvas_pixels=(u16::from_le_bytes([data[6],data[7]]) as u64).saturating_mul(u16::from_le_bytes([data[8],data[9]]) as u64);
+	let packed=data[10];
+	let mut off=13usize;
+	if packed&0x80!=0{
+		let gct_bytes=(2usize<<(packed&0x07))*3;
+		off=match off.checked_add(gct_bytes){
+			Some(off) if off<=data.len()=>off,
+			_=>return Ok(()),
+		};
+	}
+	let mut frames=0u64;
+	loop{
+		let Some(&tag)=data.get(off) else{return Ok(())};
+		match tag{
+			0x21=>{
+				// Extension block: introducer + label, then length-prefixed
+				// sub-blocks terminated by a zero-length block.
+				off+=2;
+				loop{
+					let Some(&block_size)=data.get(off) else{return Ok(())};
+					off+=1;
+					if block_size==0{
+						break;
+					}
+					off=match off.checked_add(block_size as usize){
+						Some(off) if off<=data.len()=>off,
+						_=>return Ok(()),
+					};
+				}
+			},
+			0x2C=>{
+				// Image descriptor: this is a frame.
+				frames+=1;
+				if frames>ANIMATION_FRAMES_LIMIT{
+					return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
+				}
+				let total=canvas_pixels.saturating_mul(frames);
+				if total>max_decode_pixels{
+					return Err(format!("DecodePixels {}>{}",total,max_decode_pixels));
+				}
+				if off+10>data.len(){
+					return Ok(());
+				}
+				let local_packed=data[off+9];
+				off+=10;
+				if local_packed&0x80!=0{
+					let lct_bytes=(2usize<<(local_packed&0x07))*3;
+					off=match off.checked_add(lct_bytes){
+						Some(off) if off<=data.len()=>off,
+						_=>return Ok(()),
+					};
+				}
+				// LZW minimum code size, then length-prefixed image sub-blocks.
+				off+=1;
+				loop{
+					let Some(&block_size)=data.get(off) else{return Ok(())};
+					off+=1;
+					if block_size==0{
+						break;
+					}
+					off=match off.checked_add(block_size as usize){
+						Some(off) if off<=data.len()=>off,
+						_=>return Ok(()),
+					};
+				}
+			},
+			_=>return Ok(()), // trailer (0x3B) or anything unexpected: stop.
+		}
+	}
+}
+
 impl RequestContext {
 	/// Upper bound on decoded pixels so a small file cannot expand into
 	/// gigabytes of RAM (finding #4). Tied to max_size: decoded RGBA must fit
@@ -318,6 +445,12 @@ impl RequestContext {
 				if !a.is_apng().unwrap_or(false) {
 					return self.encode_single();
 				}
+				// Refuse oversized animations before the decoder allocates
+				// every frame (same rationale as the WebP path above).
+				if let Err(e)=png_apng_within_budget(&self.src_bytes,self.max_decode_pixels()){
+					self.headers.append("X-Proxy-Error",format!("ApngAnim {}",e).parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				}
 				match a.apng() {
 					Ok(frames) => {
 						let loop_count = 0; //TODO 現在ループ回数を取得するAPIが無いため無限ループ
@@ -327,6 +460,12 @@ impl RequestContext {
 				}
 			}
 			image::ImageFormat::Gif => {
+				// Refuse oversized animations before the decoder allocates
+				// every frame (same rationale as the WebP path above).
+				if let Err(e)=gif_animation_within_budget(&self.src_bytes,self.max_decode_pixels()){
+					self.headers.append("X-Proxy-Error",format!("GifAnim {}",e).parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				}
 				match image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&self.src_bytes)) {
 					Ok(a) => {
 						let loop_count = 0; //TODO 現在ループ回数を取得するAPIが無いため無限ループ
@@ -556,11 +695,13 @@ impl RequestContext {
 		let mut err = None;
 		{
 			let mut timestamp = 0;
-			const FRAMES_LIMIT: u32 = ANIMATION_FRAMES_LIMIT as u32;
-			let mut allow_frames = FRAMES_LIMIT;
+			const FRAMES_LIMIT:u64=ANIMATION_FRAMES_LIMIT;
+			let mut frame_index:u64=0;
 			for frame in frames {
-				allow_frames -= 1;
-				if allow_frames == 0 {
+				// Checked before consuming the frame so exactly FRAMES_LIMIT
+				// frames succeeds, matching the pre-scan gates (webp/jxl) that
+				// allow `frame_count==ANIMATION_FRAMES_LIMIT` (off-by-one fix).
+				if frame_index>=FRAMES_LIMIT{
 					let mut headers = self.headers.clone();
 					headers.append(
 						"X-Proxy-Error",
@@ -568,6 +709,7 @@ impl RequestContext {
 					);
 					return (axum::http::StatusCode::BAD_GATEWAY, headers).into_response();
 				}
+				frame_index+=1;
 				if let Ok(frame) = frame {
 					timestamp += std::time::Duration::from(frame.delay()).as_millis() as i32;
 					let img = image::DynamicImage::ImageRgba8(frame.into_buffer());
