@@ -359,10 +359,7 @@ impl RequestContext{
 		let mut image=match jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(&self.src_bytes)){
 			Ok(image)=>image,
 			Err(e)=>{
-				// Debug output derives from external bytes and may contain
-				// header-invalid characters; never unwrap (finding #3).
-				let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
-				self.headers.append("X-Proxy-Error",value);
+				self.headers.append("X-Proxy-Error",jxl_error_value(e));
 				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 			},
 		};
@@ -380,12 +377,19 @@ impl RequestContext{
 		// Only treat as animated when the container declares an animation and
 		// more than one keyframe was actually decoded.
 		let animated=image.image_header().metadata.animation.is_some()&&keyframes>1;
+		// A truncated codestream still yields Ok from `read` with whatever
+		// keyframes were loaded; never treat that prefix as a complete
+		// animation (still images fail closed per-frame below, so only the
+		// animated branch needs this gate).
+		if animated&&!image.is_loading_done(){
+			self.headers.append("X-Proxy-Error","JpegXLTruncated".parse().unwrap());
+			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+		}
 		if !animated{
 			let render=match image.render_frame(0){
 				Ok(render)=>render,
 				Err(e)=>{
-					let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
-					self.headers.append("X-Proxy-Error",value);
+					self.headers.append("X-Proxy-Error",jxl_error_value(e));
 					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
 				},
 			};
@@ -427,11 +431,17 @@ impl RequestContext{
 			}
 			let render=match image.render_frame(keyframe){
 				Ok(render)=>render,
-				Err(_)=>break,
+				Err(e)=>{
+					self.headers.append("X-Proxy-Error",jxl_error_value(e));
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
 			};
 			let img=match jxl_render_to_image(&render){
 				Some(img)=>img,
-				None=>break,
+				None=>{
+					self.headers.append("X-Proxy-Error","JpegXLUnsupportedPixelFormat".parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
 			};
 			let dur_ms=(render.duration() as u64).saturating_mul(tps_den).saturating_mul(1000)/tps_num;
 			let delay=image::Delay::from_saturating_duration(std::time::Duration::from_millis(dur_ms));
@@ -682,6 +692,14 @@ fn jpegxr_img(width:u32,height:u32,stride:usize,buffer:Vec<u8>,info:jpegxr::Pixe
 		},
 		_ => None,
 	}
+}
+
+/// Build an `X-Proxy-Error` value from a jxl-oxide error.
+///
+/// The `Debug` output derives from external bytes and may contain
+/// header-invalid characters, so never unwrap (finding #3).
+fn jxl_error_value(e:impl std::fmt::Debug)->reqwest::header::HeaderValue{
+	reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"))
 }
 
 /// Convert one jxl-oxide `Render` into a `DynamicImage` of 8-bit samples.
