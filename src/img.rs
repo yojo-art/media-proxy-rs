@@ -1,6 +1,6 @@
 
 use axum::response::IntoResponse;
-use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageDecoder};
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
 
 use crate::RequestContext;
 
@@ -183,32 +183,12 @@ impl RequestContext{
 			Err(e) => {
 				match self.headers.get("Content-Type").map(|s|std::str::from_utf8(s.as_bytes())){
 				Some(Ok("image/jxl"))=>{
-					let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(&self.src_bytes));
-					let decoder=match decoder{
-						Ok(decoder)=>decoder,
-						Err(e)=>{
-							// Debug output derives from external bytes and may contain
-							// header-invalid characters; never unwrap (finding #3).
-							let value=reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"));
-							self.headers.append("X-Proxy-Error",value);
-							return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
-						},
-					};
-					// Header-only gate before pixel allocation (finding #4).
-					let (w,h)=decoder.dimensions();
-					if !self.dimensions_allowed(w as u64,h as u64){
-						return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
-					}
-					let img=DynamicImage::from_decoder(decoder).map_err(|e|e);
-						let img=match img{
-							Ok(img) => img,
-							Err(e) => {
-								self.headers.append("X-Proxy-Error",format!("JpegXL Error:{:?}",e).parse().unwrap());
-								return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
-							},
-						};
-						return self.response_img(img);
-					}
+					// 静止画・動画のJPEG XLは `encode_jxl` に一本化する。
+					// アニメヘッダと読み込み済みキーフレーム数で静止画か動画かを判定する
+					//（jxl-oxideの `image` 統合はアニメをデコードできないため、
+					// `JxlDecoder` の代わりに低レベルAPIの `JxlImage` を使う）。
+					return self.encode_jxl();
+				}
 				Some(Ok("image/jp2"))=>{
 					// Header-only gate before pixel allocation (finding #4).
 					// DumpImage::from_bytes parses headers via read_header without decoding pixels.
@@ -363,6 +343,115 @@ impl RequestContext{
 				self.encode_single()
 			},
 		}
+	}
+	/// 静止画・動画のJPEG XLをデコードして再エンコードする。
+	///
+	/// jxl-oxideの `image` クレート統合（`JxlDecoder`）はキーフレーム0しか
+	/// 描画しないためアニメは作れない。代わりに低レベルAPIの `JxlImage`
+	/// を使う。`read` はコードストリーム全体をパースするが、保持するのは
+	/// 圧縮グループとフレームヘッダのみで `max_size` 以内に収まる
+	///（`render_frame` まではフルキャンバスのバッファを確保しない）。
+	/// 先にキャンバス寸法・フレーム数・累積ピクセル予算でゲートし、
+	/// その後各キーフレームを描画して `encode_anim` に渡す
+	///（APNG/GIF/WebPと同じアニメWebP出力先）。
+	fn encode_jxl(&mut self)->axum::response::Response{
+		let mut image=match jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(&self.src_bytes)){
+			Ok(image)=>image,
+			Err(e)=>{
+				self.headers.append("X-Proxy-Error",jxl_error_value(e));
+				return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+			},
+		};
+		// jxl-oxideはCMYKのカラーマネジメントをしないためsRGBを要求する。
+		// こうすると後段の8bitストリームは生CMYK(A)ではなくRGB(A)になる。
+		if image.pixel_format().has_black(){
+			image.request_color_encoding(jxl_oxide::EnumColourEncoding::srgb(jxl_oxide::RenderingIntent::Relative));
+		}
+		// キーフレーム描画前のヘッダのみによるゲート（finding #4）。
+		let (w,h)=(image.width(),image.height());
+		if !self.dimensions_allowed(w as u64,h as u64){
+			return self.decode_limit_response(format!("DecodeDimensions {}x{} over limit",w,h));
+		}
+		let keyframes=image.num_loaded_keyframes();
+		// コンテナがアニメ宣言を持ち、かつ実際に2つ以上のキーフレームが
+		// デコードできた場合のみアニメとして扱う。
+		let animated=image.image_header().metadata.animation.is_some()&&keyframes>1;
+		// 切詰めコードストリームでも `read` は読み込めた範囲でOkを返すため、
+		// そのprefixを完全なアニメとして扱わない（静止画は後段でフレーム毎に
+		// fail-closedするため、このゲートはアニメ分岐のみでよい）。
+		if animated&&!image.is_loading_done(){
+			self.headers.append("X-Proxy-Error","JpegXLTruncated".parse().unwrap());
+			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+		}
+		if !animated{
+			let render=match image.render_frame(0){
+				Ok(render)=>render,
+				Err(e)=>{
+					self.headers.append("X-Proxy-Error",jxl_error_value(e));
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
+			};
+			let img=match jxl_render_to_image(&render){
+				Some(img)=>img,
+				None=>{
+					self.headers.append("X-Proxy-Error","JpegXLUnsupportedPixelFormat".parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
+			};
+			return self.response_img(img);
+		}
+		// WebP事前スキャン（M-02）に倣ったアニメ予算。フレーム数と
+		// frames*canvas_pixelsがデコード予算に収まること。`render_frame` は
+		// フレーム自体の範囲に関わらずキーフレーム毎にフルキャンバスの
+		// バッファを返すため、コストは部分矩形の合計ではなく
+		// frames*canvas_pixelsで見積もる。
+		let max_decode_pixels=self.max_decode_pixels();
+		let canvas_pixels=(w as u64).saturating_mul(h as u64);
+		let frame_count=keyframes as u64;
+		if frame_count>ANIMATION_FRAMES_LIMIT{
+			return self.decode_limit_response(format!("FramesLimit {}>{}",frame_count,ANIMATION_FRAMES_LIMIT));
+		}
+		let total=canvas_pixels.saturating_mul(frame_count);
+		if total>max_decode_pixels{
+			return self.decode_limit_response(format!("DecodePixels {}>{}",total,max_decode_pixels));
+		}
+		// TPS（ticks per second）= tps_numerator / tps_denominator なので
+		// ms = ticks * tps_denominator * 1000 / tps_numerator。正常なアニメなら
+		// tps_numeratorは1以上だが、0への念のためガードを入れる。
+		let anim=image.image_header().metadata.animation.as_ref().unwrap();
+		let tps_num=(anim.tps_numerator as u64).max(1);
+		let tps_den=anim.tps_denominator as u64;
+		let loop_count=anim.num_loops;
+		let mut collected:Vec<Result<image::Frame,image::ImageError>>=Vec::with_capacity(keyframes.min(ANIMATION_FRAMES_LIMIT as usize));
+		for keyframe in 0..keyframes{
+			// フレーム上限に対する多重防御（M-02）。
+			if collected.len()>=ANIMATION_FRAMES_LIMIT as usize{
+				return self.decode_limit_response(format!("FramesLimit {}",ANIMATION_FRAMES_LIMIT));
+			}
+			let render=match image.render_frame(keyframe){
+				Ok(render)=>render,
+				Err(e)=>{
+					self.headers.append("X-Proxy-Error",jxl_error_value(e));
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
+			};
+			let img=match jxl_render_to_image(&render){
+				Some(img)=>img,
+				None=>{
+					self.headers.append("X-Proxy-Error","JpegXLUnsupportedPixelFormat".parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				},
+			};
+			let dur_ms=(render.duration() as u64).saturating_mul(tps_den).saturating_mul(1000)/tps_num;
+			let delay=image::Delay::from_saturating_duration(std::time::Duration::from_millis(dur_ms));
+			collected.push(Ok(image::Frame::from_parts(img.into_rgba8(),0,0,delay)));
+		}
+		if collected.is_empty(){
+			self.headers.append("X-Proxy-Error","NoAvailableFrames".parse().unwrap());
+			return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+		}
+		let frames=image::Frames::new(Box::new(collected.into_iter()));
+		self.encode_anim(frames,loop_count)
 	}
 	fn encode_anim(&self,frames:image::Frames,loop_count:u32)->axum::response::Response{
 		let conf=webp::WebPConfig::new().unwrap();
@@ -601,6 +690,37 @@ fn jpegxr_img(width:u32,height:u32,stride:usize,buffer:Vec<u8>,info:jpegxr::Pixe
 			image::ImageBuffer::from_raw(width,height,buffer).map(|i|DynamicImage::ImageRgba8(i))
 		},
 		_ => None,
+	}
+}
+
+/// jxl-oxideのエラーから `X-Proxy-Error` 値を組み立てる。
+///
+/// `Debug` 出力は外部由来バイトに基づくためヘッダ不正文字を含む場合が
+/// あり、unwrapしてはならない（finding #3）。
+fn jxl_error_value(e:impl std::fmt::Debug)->reqwest::header::HeaderValue{
+	reqwest::header::HeaderValue::from_bytes(format!("JpegXL Error:{:?}",e).as_bytes()).unwrap_or_else(|_|reqwest::header::HeaderValue::from_static("JpegXLError"))
+}
+
+/// jxl-oxideの `Render` 1件を8bitサンプルの `DynamicImage` に変換する。
+///
+/// ストリームは色＋（任意で）black＋（任意で）alphaチャネルを持ち、
+/// orientationと要求した色エンコーディング（CMYK用にsRGB）を適用済み。
+/// CMYKは上流の `request_color_encoding` で変換済みのため、ここに届くのは
+/// 最大4チャネル。それ以外は未対応として扱う。
+fn jxl_render_to_image(render:&jxl_oxide::Render)->Option<DynamicImage>{
+	let mut stream=render.stream();
+	let width=stream.width();
+	let height=stream.height();
+	let channels=stream.channels() as usize;
+	let len=(width as usize).checked_mul(height as usize)?.checked_mul(channels)?;
+	let mut buf=vec![0u8;len];
+	stream.write_to_buffer(&mut buf);
+	match channels{
+		1=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageLuma8),
+		2=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageLumaA8),
+		3=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageRgb8),
+		4=>image::ImageBuffer::from_raw(width,height,buf).map(DynamicImage::ImageRgba8),
+		_=>None,
 	}
 }
 
