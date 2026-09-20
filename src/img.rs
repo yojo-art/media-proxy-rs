@@ -94,10 +94,9 @@ fn webp_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<(
 	Ok(())
 }
 
-/// APNG pre-scan (frames*canvas_pixels budget, same rationale as
-/// `webp_animation_within_budget`): reject oversized animations using only
-/// the `IHDR`/`acTL` chunk headers, before the `image` crate decodes any
-/// frame data.
+/// APNG事前スキャン(`frames*canvas_pixels`予算、`webp_animation_within_budget`と同じ
+/// 考え方):`image`クレートがフレームデータをデコードする前に、`IHDR`/`acTL`チャンク
+/// ヘッダのみを使って過大なアニメーションを拒否する。
 fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 	const SIG:[u8;8]=[137,80,78,71,13,10,26,10];
 	if !data.starts_with(&SIG){
@@ -109,7 +108,7 @@ fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 		let len=u32::from_be_bytes([data[off],data[off+1],data[off+2],data[off+3]]) as usize;
 		let ctype=&data[off+4..off+8];
 		let body=off+8;
-		// +4 for the trailing CRC.
+		// 末尾のCRCのために+4。
 		let end=match body.checked_add(len).and_then(|e|e.checked_add(4)){
 			Some(end) if end<=data.len()=>end,
 			_=>break,
@@ -121,8 +120,8 @@ fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 		}
 		if ctype==b"acTL"&&len>=4{
 			let frames=u32::from_be_bytes([data[body],data[body+1],data[body+2],data[body+3]]) as u64;
-			// acTL is required to precede IDAT/fdAT, so canvas_pixels (from
-			// the always-first IHDR) is already known here.
+			// acTLはIDAT/fdATより前に来ることが必須なので、canvas_pixels
+			// (常に先頭にあるIHDR由来)はこの時点で既に判明している。
 			if frames>ANIMATION_FRAMES_LIMIT{
 				return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
 			}
@@ -133,8 +132,8 @@ fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 			return Ok(());
 		}
 		if ctype==b"IDAT"{
-			// No acTL before the first IDAT: not an animation we can budget
-			// this way; let the normal APNG/PNG decode path handle it.
+			// 最初のIDATの前にacTLが無い:この方法では予算計算できないアニメーション
+			// なので、通常のAPNG/PNGデコード経路に任せる。
 			break;
 		}
 		off=end;
@@ -142,10 +141,9 @@ fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 	Ok(())
 }
 
-/// GIF pre-scan (frames*canvas_pixels budget, same rationale as
-/// `webp_animation_within_budget`): GIF has no upfront frame count, so this
-/// walks the block structure (extensions and image descriptors) counting
-/// frames without decoding any pixel data.
+/// GIF事前スキャン(`frames*canvas_pixels`予算、`webp_animation_within_budget`と同じ
+/// 考え方):GIFには事前のフレーム数が無いため、ブロック構造(拡張ブロックと画像
+/// ディスクリプタ)を走査してピクセルデータをデコードせずにフレームを数える。
 fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 	if data.len()<13||!(data.starts_with(b"GIF87a")||data.starts_with(b"GIF89a")){
 		return Ok(());
@@ -165,8 +163,8 @@ fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),Stri
 		let Some(&tag)=data.get(off) else{return Ok(())};
 		match tag{
 			0x21=>{
-				// Extension block: introducer + label, then length-prefixed
-				// sub-blocks terminated by a zero-length block.
+				// 拡張ブロック:introducer+ラベル、その後に長さ前置きのサブブロックが
+				// ゼロ長ブロックで終端される。
 				off+=2;
 				loop{
 					let Some(&block_size)=data.get(off) else{return Ok(())};
@@ -181,7 +179,7 @@ fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),Stri
 				}
 			},
 			0x2C=>{
-				// Image descriptor: this is a frame.
+				// 画像ディスクリプタ:これが1フレーム。
 				frames+=1;
 				if frames>ANIMATION_FRAMES_LIMIT{
 					return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
@@ -202,7 +200,7 @@ fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),Stri
 						_=>return Ok(()),
 					};
 				}
-				// LZW minimum code size, then length-prefixed image sub-blocks.
+				// LZW最小コードサイズ、その後に長さ前置きの画像サブブロック。
 				off+=1;
 				loop{
 					let Some(&block_size)=data.get(off) else{return Ok(())};
@@ -216,7 +214,7 @@ fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),Stri
 					};
 				}
 			},
-			_=>return Ok(()), // trailer (0x3B) or anything unexpected: stop.
+			_=>return Ok(()), // トレーラー(0x3B)または想定外のタグ:ここで停止。
 		}
 	}
 }
@@ -445,8 +443,8 @@ impl RequestContext {
 				if !a.is_apng().unwrap_or(false) {
 					return self.encode_single();
 				}
-				// Refuse oversized animations before the decoder allocates
-				// every frame (same rationale as the WebP path above).
+				// デコーダが全フレームを確保する前に、過大なアニメーションを拒否する
+				// (上記のWebP経路と同じ考え方)。
 				if let Err(e)=png_apng_within_budget(&self.src_bytes,self.max_decode_pixels()){
 					self.headers.append("X-Proxy-Error",format!("ApngAnim {}",e).parse().unwrap());
 					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
@@ -460,8 +458,8 @@ impl RequestContext {
 				}
 			}
 			image::ImageFormat::Gif => {
-				// Refuse oversized animations before the decoder allocates
-				// every frame (same rationale as the WebP path above).
+				// デコーダが全フレームを確保する前に、過大なアニメーションを拒否する
+				// (上記のWebP経路と同じ考え方)。
 				if let Err(e)=gif_animation_within_budget(&self.src_bytes,self.max_decode_pixels()){
 					self.headers.append("X-Proxy-Error",format!("GifAnim {}",e).parse().unwrap());
 					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
@@ -698,9 +696,9 @@ impl RequestContext {
 			const FRAMES_LIMIT:u64=ANIMATION_FRAMES_LIMIT;
 			let mut frame_index:u64=0;
 			for frame in frames {
-				// Checked before consuming the frame so exactly FRAMES_LIMIT
-				// frames succeeds, matching the pre-scan gates (webp/jxl) that
-				// allow `frame_count==ANIMATION_FRAMES_LIMIT` (off-by-one fix).
+				// フレームを消費する前にチェックするので、ちょうどFRAMES_LIMITフレームまで
+				// 成功する。これは事前スキャンゲート(webp/jxl)が`frame_count==ANIMATION_FRAMES_LIMIT`
+				// を許可する仕様と一致させる(オフバイワン修正)。
 				if frame_index>=FRAMES_LIMIT{
 					let mut headers = self.headers.clone();
 					headers.append(
