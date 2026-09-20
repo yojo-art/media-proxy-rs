@@ -4,7 +4,6 @@ pub const FILE_TYPE_BROWSERSAFE: [&str; 20] = [
 	"video/ogg",
 	"audio/ogg",
 	"application/ogg",
-
 	// ISO/IEC base media file format
 	"video/quicktime",
 	"video/mp4",
@@ -13,15 +12,11 @@ pub const FILE_TYPE_BROWSERSAFE: [&str; 20] = [
 	"audio/x-m4a",
 	"video/3gpp",
 	"video/3gpp2",
-
 	"video/mpeg",
 	"audio/mpeg",
-
 	"video/webm",
 	"audio/webm",
-
 	"audio/aac",
-
 	// see https://github.com/misskey-dev/misskey/pull/10686
 	"audio/flac",
 	"audio/wav",
