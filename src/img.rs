@@ -97,46 +97,55 @@ fn webp_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<(
 /// APNG事前スキャン(`frames*canvas_pixels`予算、`webp_animation_within_budget`と同じ
 /// 考え方):`image`クレートがフレームデータをデコードする前に、`IHDR`/`acTL`チャンク
 /// ヘッダのみを使って過大なアニメーションを拒否する。
-fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
-	const SIG:[u8;8]=[137,80,78,71,13,10,26,10];
-	if !data.starts_with(&SIG){
+fn png_apng_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<(), String> {
+	const SIG: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+	if !data.starts_with(&SIG) {
 		return Ok(());
 	}
-	let mut off=8usize;
-	let mut canvas_pixels:Option<u64>=None;
-	while off+8<=data.len(){
-		let len=u32::from_be_bytes([data[off],data[off+1],data[off+2],data[off+3]]) as usize;
-		let ctype=&data[off+4..off+8];
-		let body=off+8;
+	let mut off = 8usize;
+	let mut canvas_pixels: Option<u64> = None;
+	while off + 8 <= data.len() {
+		let len =
+			u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
+		let ctype = &data[off + 4..off + 8];
+		let body = off + 8;
 		// 末尾のCRCのために+4。
-		let end=match body.checked_add(len).and_then(|e|e.checked_add(4)){
-			Some(end) if end<=data.len()=>end,
-			_=>break,
+		let end = match body.checked_add(len).and_then(|e| e.checked_add(4)) {
+			Some(end) if end <= data.len() => end,
+			_ => break,
 		};
-		if ctype==b"IHDR"&&len>=8{
-			let w=u32::from_be_bytes([data[body],data[body+1],data[body+2],data[body+3]]) as u64;
-			let h=u32::from_be_bytes([data[body+4],data[body+5],data[body+6],data[body+7]]) as u64;
-			canvas_pixels=Some(w.saturating_mul(h));
+		if ctype == b"IHDR" && len >= 8 {
+			let w = u32::from_be_bytes([data[body], data[body + 1], data[body + 2], data[body + 3]])
+				as u64;
+			let h = u32::from_be_bytes([
+				data[body + 4],
+				data[body + 5],
+				data[body + 6],
+				data[body + 7],
+			]) as u64;
+			canvas_pixels = Some(w.saturating_mul(h));
 		}
-		if ctype==b"acTL"&&len>=4{
-			let frames=u32::from_be_bytes([data[body],data[body+1],data[body+2],data[body+3]]) as u64;
+		if ctype == b"acTL" && len >= 4 {
+			let frames =
+				u32::from_be_bytes([data[body], data[body + 1], data[body + 2], data[body + 3]])
+					as u64;
 			// acTLはIDAT/fdATより前に来ることが必須なので、canvas_pixels
 			// (常に先頭にあるIHDR由来)はこの時点で既に判明している。
-			if frames>ANIMATION_FRAMES_LIMIT{
-				return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
+			if frames > ANIMATION_FRAMES_LIMIT {
+				return Err(format!("FramesLimit {}>{}", frames, ANIMATION_FRAMES_LIMIT));
 			}
-			let total=canvas_pixels.unwrap_or(u64::MAX).saturating_mul(frames);
-			if total>max_decode_pixels{
-				return Err(format!("DecodePixels {}>{}",total,max_decode_pixels));
+			let total = canvas_pixels.unwrap_or(u64::MAX).saturating_mul(frames);
+			if total > max_decode_pixels {
+				return Err(format!("DecodePixels {}>{}", total, max_decode_pixels));
 			}
 			return Ok(());
 		}
-		if ctype==b"IDAT"{
+		if ctype == b"IDAT" {
 			// 最初のIDATの前にacTLが無い:この方法では予算計算できないアニメーション
 			// なので、通常のAPNG/PNGデコード経路に任せる。
 			break;
 		}
-		off=end;
+		off = end;
 	}
 	Ok(())
 }
@@ -144,77 +153,84 @@ fn png_apng_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
 /// GIF事前スキャン(`frames*canvas_pixels`予算、`webp_animation_within_budget`と同じ
 /// 考え方):GIFには事前のフレーム数が無いため、ブロック構造(拡張ブロックと画像
 /// ディスクリプタ)を走査してピクセルデータをデコードせずにフレームを数える。
-fn gif_animation_within_budget(data:&[u8],max_decode_pixels:u64)->Result<(),String>{
-	if data.len()<13||!(data.starts_with(b"GIF87a")||data.starts_with(b"GIF89a")){
+fn gif_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<(), String> {
+	if data.len() < 13 || !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
 		return Ok(());
 	}
-	let canvas_pixels=(u16::from_le_bytes([data[6],data[7]]) as u64).saturating_mul(u16::from_le_bytes([data[8],data[9]]) as u64);
-	let packed=data[10];
-	let mut off=13usize;
-	if packed&0x80!=0{
-		let gct_bytes=(2usize<<(packed&0x07))*3;
-		off=match off.checked_add(gct_bytes){
-			Some(off) if off<=data.len()=>off,
-			_=>return Ok(()),
+	let canvas_pixels = (u16::from_le_bytes([data[6], data[7]]) as u64)
+		.saturating_mul(u16::from_le_bytes([data[8], data[9]]) as u64);
+	let packed = data[10];
+	let mut off = 13usize;
+	if packed & 0x80 != 0 {
+		let gct_bytes = (2usize << (packed & 0x07)) * 3;
+		off = match off.checked_add(gct_bytes) {
+			Some(off) if off <= data.len() => off,
+			_ => return Ok(()),
 		};
 	}
-	let mut frames=0u64;
-	loop{
-		let Some(&tag)=data.get(off) else{return Ok(())};
-		match tag{
-			0x21=>{
+	let mut frames = 0u64;
+	loop {
+		let Some(&tag) = data.get(off) else {
+			return Ok(());
+		};
+		match tag {
+			0x21 => {
 				// 拡張ブロック:introducer+ラベル、その後に長さ前置きのサブブロックが
 				// ゼロ長ブロックで終端される。
-				off+=2;
-				loop{
-					let Some(&block_size)=data.get(off) else{return Ok(())};
-					off+=1;
-					if block_size==0{
+				off += 2;
+				loop {
+					let Some(&block_size) = data.get(off) else {
+						return Ok(());
+					};
+					off += 1;
+					if block_size == 0 {
 						break;
 					}
-					off=match off.checked_add(block_size as usize){
-						Some(off) if off<=data.len()=>off,
-						_=>return Ok(()),
+					off = match off.checked_add(block_size as usize) {
+						Some(off) if off <= data.len() => off,
+						_ => return Ok(()),
 					};
 				}
-			},
-			0x2C=>{
+			}
+			0x2C => {
 				// 画像ディスクリプタ:これが1フレーム。
-				frames+=1;
-				if frames>ANIMATION_FRAMES_LIMIT{
-					return Err(format!("FramesLimit {}>{}",frames,ANIMATION_FRAMES_LIMIT));
+				frames += 1;
+				if frames > ANIMATION_FRAMES_LIMIT {
+					return Err(format!("FramesLimit {}>{}", frames, ANIMATION_FRAMES_LIMIT));
 				}
-				let total=canvas_pixels.saturating_mul(frames);
-				if total>max_decode_pixels{
-					return Err(format!("DecodePixels {}>{}",total,max_decode_pixels));
+				let total = canvas_pixels.saturating_mul(frames);
+				if total > max_decode_pixels {
+					return Err(format!("DecodePixels {}>{}", total, max_decode_pixels));
 				}
-				if off+10>data.len(){
+				if off + 10 > data.len() {
 					return Ok(());
 				}
-				let local_packed=data[off+9];
-				off+=10;
-				if local_packed&0x80!=0{
-					let lct_bytes=(2usize<<(local_packed&0x07))*3;
-					off=match off.checked_add(lct_bytes){
-						Some(off) if off<=data.len()=>off,
-						_=>return Ok(()),
+				let local_packed = data[off + 9];
+				off += 10;
+				if local_packed & 0x80 != 0 {
+					let lct_bytes = (2usize << (local_packed & 0x07)) * 3;
+					off = match off.checked_add(lct_bytes) {
+						Some(off) if off <= data.len() => off,
+						_ => return Ok(()),
 					};
 				}
 				// LZW最小コードサイズ、その後に長さ前置きの画像サブブロック。
-				off+=1;
-				loop{
-					let Some(&block_size)=data.get(off) else{return Ok(())};
-					off+=1;
-					if block_size==0{
+				off += 1;
+				loop {
+					let Some(&block_size) = data.get(off) else {
+						return Ok(());
+					};
+					off += 1;
+					if block_size == 0 {
 						break;
 					}
-					off=match off.checked_add(block_size as usize){
-						Some(off) if off<=data.len()=>off,
-						_=>return Ok(()),
+					off = match off.checked_add(block_size as usize) {
+						Some(off) if off <= data.len() => off,
+						_ => return Ok(()),
 					};
 				}
-			},
-			_=>return Ok(()), // トレーラー(0x3B)または想定外のタグ:ここで停止。
+			}
+			_ => return Ok(()), // トレーラー(0x3B)または想定外のタグ:ここで停止。
 		}
 	}
 }
@@ -445,9 +461,11 @@ impl RequestContext {
 				}
 				// デコーダが全フレームを確保する前に、過大なアニメーションを拒否する
 				// (上記のWebP経路と同じ考え方)。
-				if let Err(e)=png_apng_within_budget(&self.src_bytes,self.max_decode_pixels()){
-					self.headers.append("X-Proxy-Error",format!("ApngAnim {}",e).parse().unwrap());
-					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				if let Err(e) = png_apng_within_budget(&self.src_bytes, self.max_decode_pixels()) {
+					self.headers
+						.append("X-Proxy-Error", format!("ApngAnim {}", e).parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
+						.into_response();
 				}
 				match a.apng() {
 					Ok(frames) => {
@@ -460,9 +478,13 @@ impl RequestContext {
 			image::ImageFormat::Gif => {
 				// デコーダが全フレームを確保する前に、過大なアニメーションを拒否する
 				// (上記のWebP経路と同じ考え方)。
-				if let Err(e)=gif_animation_within_budget(&self.src_bytes,self.max_decode_pixels()){
-					self.headers.append("X-Proxy-Error",format!("GifAnim {}",e).parse().unwrap());
-					return (axum::http::StatusCode::BAD_GATEWAY,self.headers.clone()).into_response();
+				if let Err(e) =
+					gif_animation_within_budget(&self.src_bytes, self.max_decode_pixels())
+				{
+					self.headers
+						.append("X-Proxy-Error", format!("GifAnim {}", e).parse().unwrap());
+					return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
+						.into_response();
 				}
 				match image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&self.src_bytes)) {
 					Ok(a) => {
@@ -693,13 +715,13 @@ impl RequestContext {
 		let mut err = None;
 		{
 			let mut timestamp = 0;
-			const FRAMES_LIMIT:u64=ANIMATION_FRAMES_LIMIT;
-			let mut frame_index:u64=0;
+			const FRAMES_LIMIT: u64 = ANIMATION_FRAMES_LIMIT;
+			let mut frame_index: u64 = 0;
 			for frame in frames {
 				// フレームを消費する前にチェックするので、ちょうどFRAMES_LIMITフレームまで
 				// 成功する。これは事前スキャンゲート(webp/jxl)が`frame_count==ANIMATION_FRAMES_LIMIT`
 				// を許可する仕様と一致させる(オフバイワン修正)。
-				if frame_index>=FRAMES_LIMIT{
+				if frame_index >= FRAMES_LIMIT {
 					let mut headers = self.headers.clone();
 					headers.append(
 						"X-Proxy-Error",
@@ -707,7 +729,7 @@ impl RequestContext {
 					);
 					return (axum::http::StatusCode::BAD_GATEWAY, headers).into_response();
 				}
-				frame_index+=1;
+				frame_index += 1;
 				if let Ok(frame) = frame {
 					timestamp += std::time::Duration::from(frame.delay()).as_millis() as i32;
 					let img = image::DynamicImage::ImageRgba8(frame.into_buffer());
@@ -1059,212 +1081,232 @@ fn resize(
 }
 
 #[cfg(test)]
-mod tests{
+mod tests {
 	use super::*;
-	use crate::{ConfigFile,FilterType,RequestParams};
+	use crate::{ConfigFile, FilterType, RequestParams};
 
-	fn png_chunk(ctype:&[u8;4],data:&[u8])->Vec<u8>{
-		let mut v=Vec::new();
+	fn png_chunk(ctype: &[u8; 4], data: &[u8]) -> Vec<u8> {
+		let mut v = Vec::new();
 		v.extend_from_slice(&(data.len() as u32).to_be_bytes());
 		v.extend_from_slice(ctype);
 		v.extend_from_slice(data);
-		v.extend_from_slice(&[0,0,0,0]);//CRCはpng_apng_within_budgetで検証されない
+		v.extend_from_slice(&[0, 0, 0, 0]); //CRCはpng_apng_within_budgetで検証されない
 		v
 	}
-	fn build_apng(width:u32,height:u32,frames:u32)->Vec<u8>{
-		let mut v=vec![137,80,78,71,13,10,26,10];
-		let mut ihdr=Vec::new();
+	fn build_apng(width: u32, height: u32, frames: u32) -> Vec<u8> {
+		let mut v = vec![137, 80, 78, 71, 13, 10, 26, 10];
+		let mut ihdr = Vec::new();
 		ihdr.extend_from_slice(&width.to_be_bytes());
 		ihdr.extend_from_slice(&height.to_be_bytes());
-		ihdr.extend_from_slice(&[8,6,0,0,0]);
-		v.extend_from_slice(&png_chunk(b"IHDR",&ihdr));
-		let mut actl=Vec::new();
+		ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+		v.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+		let mut actl = Vec::new();
 		actl.extend_from_slice(&frames.to_be_bytes());
 		actl.extend_from_slice(&0u32.to_be_bytes());
-		v.extend_from_slice(&png_chunk(b"acTL",&actl));
+		v.extend_from_slice(&png_chunk(b"acTL", &actl));
 		v
 	}
-	fn build_png_without_actl(width:u32,height:u32)->Vec<u8>{
-		let mut v=vec![137,80,78,71,13,10,26,10];
-		let mut ihdr=Vec::new();
+	fn build_png_without_actl(width: u32, height: u32) -> Vec<u8> {
+		let mut v = vec![137, 80, 78, 71, 13, 10, 26, 10];
+		let mut ihdr = Vec::new();
 		ihdr.extend_from_slice(&width.to_be_bytes());
 		ihdr.extend_from_slice(&height.to_be_bytes());
-		ihdr.extend_from_slice(&[8,6,0,0,0]);
-		v.extend_from_slice(&png_chunk(b"IHDR",&ihdr));
-		v.extend_from_slice(&png_chunk(b"IDAT",&[0,1,2,3]));
+		ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+		v.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+		v.extend_from_slice(&png_chunk(b"IDAT", &[0, 1, 2, 3]));
 		v
 	}
 
 	#[test]
-	fn apng_non_png_data_is_ok(){
-		assert!(png_apng_within_budget(b"not a png at all",1_000_000).is_ok());
+	fn apng_non_png_data_is_ok() {
+		assert!(png_apng_within_budget(b"not a png at all", 1_000_000).is_ok());
 	}
 	#[test]
-	fn apng_within_budget_is_ok(){
-		let data=build_apng(10,10,5);
-		assert!(png_apng_within_budget(&data,10_000).is_ok());
+	fn apng_within_budget_is_ok() {
+		let data = build_apng(10, 10, 5);
+		assert!(png_apng_within_budget(&data, 10_000).is_ok());
 	}
 	#[test]
-	fn apng_frames_at_limit_is_ok(){
+	fn apng_frames_at_limit_is_ok() {
 		// ちょうどANIMATION_FRAMES_LIMITフレームは許可される(オフバイワン境界)。
-		let data=build_apng(1,1,ANIMATION_FRAMES_LIMIT as u32);
-		assert!(png_apng_within_budget(&data,ANIMATION_FRAMES_LIMIT).is_ok());
+		let data = build_apng(1, 1, ANIMATION_FRAMES_LIMIT as u32);
+		assert!(png_apng_within_budget(&data, ANIMATION_FRAMES_LIMIT).is_ok());
 	}
 	#[test]
-	fn apng_frames_over_limit_is_err(){
-		let data=build_apng(1,1,ANIMATION_FRAMES_LIMIT as u32+1);
-		let err=png_apng_within_budget(&data,ANIMATION_FRAMES_LIMIT+1).unwrap_err();
-		assert!(err.contains("FramesLimit"),"{}",err);
+	fn apng_frames_over_limit_is_err() {
+		let data = build_apng(1, 1, ANIMATION_FRAMES_LIMIT as u32 + 1);
+		let err = png_apng_within_budget(&data, ANIMATION_FRAMES_LIMIT + 1).unwrap_err();
+		assert!(err.contains("FramesLimit"), "{}", err);
 	}
 	#[test]
-	fn apng_decode_pixels_over_budget_is_err(){
-		let data=build_apng(100_000,100_000,2);
-		let err=png_apng_within_budget(&data,1_000).unwrap_err();
-		assert!(err.contains("DecodePixels"),"{}",err);
+	fn apng_decode_pixels_over_budget_is_err() {
+		let data = build_apng(100_000, 100_000, 2);
+		let err = png_apng_within_budget(&data, 1_000).unwrap_err();
+		assert!(err.contains("DecodePixels"), "{}", err);
 	}
 	#[test]
-	fn png_without_actl_is_ok(){
+	fn png_without_actl_is_ok() {
 		// acTLの無い通常PNGはIDATで走査を止め、通常のPNGデコード経路に任せる。
-		let data=build_png_without_actl(10,10);
-		assert!(png_apng_within_budget(&data,1_000_000).is_ok());
+		let data = build_png_without_actl(10, 10);
+		assert!(png_apng_within_budget(&data, 1_000_000).is_ok());
 	}
 	#[test]
-	fn apng_truncated_chunk_is_ok(){
+	fn apng_truncated_chunk_is_ok() {
 		// 長さが宣言長より短い壊れたチャンクではpanicせず、走査を止めて
 		// 通常のデコード経路にfail-openする。
-		let mut data=vec![137,80,78,71,13,10,26,10];
-		data.extend_from_slice(&[0,0,0,20]);
+		let mut data = vec![137, 80, 78, 71, 13, 10, 26, 10];
+		data.extend_from_slice(&[0, 0, 0, 20]);
 		data.extend_from_slice(b"IHDR");
-		assert!(png_apng_within_budget(&data,1_000_000).is_ok());
+		assert!(png_apng_within_budget(&data, 1_000_000).is_ok());
 	}
 
-	fn gif_frame(width:u16,height:u16)->Vec<u8>{
-		let mut v=vec![0x2C];
-		v.extend_from_slice(&0u16.to_le_bytes());//left
-		v.extend_from_slice(&0u16.to_le_bytes());//top
+	fn gif_frame(width: u16, height: u16) -> Vec<u8> {
+		let mut v = vec![0x2C];
+		v.extend_from_slice(&0u16.to_le_bytes()); //left
+		v.extend_from_slice(&0u16.to_le_bytes()); //top
 		v.extend_from_slice(&width.to_le_bytes());
 		v.extend_from_slice(&height.to_le_bytes());
-		v.push(0);//packed:LCT無し
-		v.push(2);//LZW最小コードサイズ
-		v.push(1);//サブブロック長
-		v.push(0);//画像データ1バイト
-		v.push(0);//ゼロ長ブロックで終端
+		v.push(0); //packed:LCT無し
+		v.push(2); //LZW最小コードサイズ
+		v.push(1); //サブブロック長
+		v.push(0); //画像データ1バイト
+		v.push(0); //ゼロ長ブロックで終端
 		v
 	}
-	fn gif_ext()->Vec<u8>{
-		vec![0x21,0xF9,4,0,0,0,0,0]
+	fn gif_ext() -> Vec<u8> {
+		vec![0x21, 0xF9, 4, 0, 0, 0, 0, 0]
 	}
-	fn build_gif(canvas_w:u16,canvas_h:u16,frames:&[Vec<u8>])->Vec<u8>{
-		let mut v=Vec::new();
+	fn build_gif(canvas_w: u16, canvas_h: u16, frames: &[Vec<u8>]) -> Vec<u8> {
+		let mut v = Vec::new();
 		v.extend_from_slice(b"GIF89a");
 		v.extend_from_slice(&canvas_w.to_le_bytes());
 		v.extend_from_slice(&canvas_h.to_le_bytes());
-		v.push(0);//packed:GCT無し
-		v.push(0);//背景色インデックス
-		v.push(0);//画素比
-		for f in frames{
+		v.push(0); //packed:GCT無し
+		v.push(0); //背景色インデックス
+		v.push(0); //画素比
+		for f in frames {
 			v.extend_from_slice(f);
 		}
-		v.push(0x3B);//トレーラー
+		v.push(0x3B); //トレーラー
 		v
 	}
 
 	#[test]
-	fn gif_non_gif_data_is_ok(){
-		assert!(gif_animation_within_budget(b"not a gif",1_000_000).is_ok());
+	fn gif_non_gif_data_is_ok() {
+		assert!(gif_animation_within_budget(b"not a gif", 1_000_000).is_ok());
 	}
 	#[test]
-	fn gif_single_frame_is_ok(){
-		let data=build_gif(10,10,&[gif_frame(10,10)]);
-		assert!(gif_animation_within_budget(&data,1_000).is_ok());
+	fn gif_single_frame_is_ok() {
+		let data = build_gif(10, 10, &[gif_frame(10, 10)]);
+		assert!(gif_animation_within_budget(&data, 1_000).is_ok());
 	}
 	#[test]
-	fn gif_frames_at_limit_is_ok(){
-		let frames:Vec<Vec<u8>>=(0..ANIMATION_FRAMES_LIMIT).map(|_|gif_frame(1,1)).collect();
-		let data=build_gif(1,1,&frames);
-		assert!(gif_animation_within_budget(&data,ANIMATION_FRAMES_LIMIT).is_ok());
+	fn gif_frames_at_limit_is_ok() {
+		let frames: Vec<Vec<u8>> = (0..ANIMATION_FRAMES_LIMIT)
+			.map(|_| gif_frame(1, 1))
+			.collect();
+		let data = build_gif(1, 1, &frames);
+		assert!(gif_animation_within_budget(&data, ANIMATION_FRAMES_LIMIT).is_ok());
 	}
 	#[test]
-	fn gif_frames_over_limit_is_err(){
-		let frames:Vec<Vec<u8>>=(0..ANIMATION_FRAMES_LIMIT+1).map(|_|gif_frame(1,1)).collect();
-		let data=build_gif(1,1,&frames);
-		let err=gif_animation_within_budget(&data,ANIMATION_FRAMES_LIMIT+1).unwrap_err();
-		assert!(err.contains("FramesLimit"),"{}",err);
+	fn gif_frames_over_limit_is_err() {
+		let frames: Vec<Vec<u8>> = (0..ANIMATION_FRAMES_LIMIT + 1)
+			.map(|_| gif_frame(1, 1))
+			.collect();
+		let data = build_gif(1, 1, &frames);
+		let err = gif_animation_within_budget(&data, ANIMATION_FRAMES_LIMIT + 1).unwrap_err();
+		assert!(err.contains("FramesLimit"), "{}", err);
 	}
 	#[test]
-	fn gif_decode_pixels_over_budget_is_err(){
-		let data=build_gif(65000,65000,&[gif_frame(1,1)]);
-		let err=gif_animation_within_budget(&data,1_000).unwrap_err();
-		assert!(err.contains("DecodePixels"),"{}",err);
+	fn gif_decode_pixels_over_budget_is_err() {
+		let data = build_gif(65000, 65000, &[gif_frame(1, 1)]);
+		let err = gif_animation_within_budget(&data, 1_000).unwrap_err();
+		assert!(err.contains("DecodePixels"), "{}", err);
 	}
 	#[test]
-	fn gif_extension_blocks_are_not_counted_as_frames(){
+	fn gif_extension_blocks_are_not_counted_as_frames() {
 		// 拡張ブロックをANIMATION_FRAMES_LIMITを超える数だけ挟んでも、実フレームは
 		// 1枚だけなのでフレーム数予算には影響しない。
-		let mut frames:Vec<Vec<u8>>=(0..ANIMATION_FRAMES_LIMIT+1).map(|_|gif_ext()).collect();
-		frames.push(gif_frame(10,10));
-		let data=build_gif(10,10,&frames);
-		assert!(gif_animation_within_budget(&data,1_000).is_ok());
+		let mut frames: Vec<Vec<u8>> = (0..ANIMATION_FRAMES_LIMIT + 1).map(|_| gif_ext()).collect();
+		frames.push(gif_frame(10, 10));
+		let data = build_gif(10, 10, &frames);
+		assert!(gif_animation_within_budget(&data, 1_000).is_ok());
 	}
 
-	fn test_request_context(max_size:u64)->RequestContext{
-		RequestContext{
-			is_accept_avif:false,
-			headers:axum::http::HeaderMap::new(),
-			parms:RequestParams{
-				url:String::new(),
-				r#static:None,
-				emoji:None,
-				avatar:None,
-				preview:None,
-				badge:None,
-				fallback:None,
+	fn test_request_context(max_size: u64) -> RequestContext {
+		RequestContext {
+			is_accept_avif: false,
+			headers: axum::http::HeaderMap::new(),
+			parms: RequestParams {
+				url: String::new(),
+				r#static: None,
+				emoji: None,
+				avatar: None,
+				preview: None,
+				badge: None,
+				fallback: None,
 			},
-			src_bytes:Vec::new(),
-			config:std::sync::Arc::new(ConfigFile{
-				bind_addr:"0.0.0.0:0".to_owned(),
-				timeout:1000,
-				user_agent:"test".to_owned(),
+			src_bytes: Vec::new(),
+			config: std::sync::Arc::new(ConfigFile {
+				bind_addr: "0.0.0.0:0".to_owned(),
+				timeout: 1000,
+				user_agent: "test".to_owned(),
 				max_size,
-				proxy:None,
-				filter_type:FilterType::Triangle,
-				max_pixels:2048,
-				append_headers:vec![],
-				load_system_fonts:false,
-				webp_quality:75.0,
-				encode_avif:false,
-				allowed_networks:None,
-				blocked_networks:None,
-				blocked_hosts:None,
+				proxy: None,
+				filter_type: FilterType::Triangle,
+				max_pixels: 2048,
+				append_headers: vec![],
+				load_system_fonts: false,
+				webp_quality: 75.0,
+				encode_avif: false,
+				allowed_networks: None,
+				blocked_networks: None,
+				blocked_hosts: None,
 			}),
-			codec:Err(None),
-			dummy_img:std::sync::Arc::new(Vec::new()),
-			fontdb:std::sync::Arc::new(resvg::usvg::fontdb::Database::new()),
+			codec: Err(None),
+			dummy_img: std::sync::Arc::new(Vec::new()),
+			fontdb: std::sync::Arc::new(resvg::usvg::fontdb::Database::new()),
 		}
 	}
-	fn make_frame()->Result<image::Frame,image::ImageError>{
-		let img=image::RgbaImage::from_pixel(1,1,image::Rgba([255,0,0,255]));
-		Ok(image::Frame::from_parts(img,0,0,image::Delay::from_saturating_duration(std::time::Duration::from_millis(10))))
+	fn make_frame() -> Result<image::Frame, image::ImageError> {
+		let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+		Ok(image::Frame::from_parts(
+			img,
+			0,
+			0,
+			image::Delay::from_saturating_duration(std::time::Duration::from_millis(10)),
+		))
 	}
 
 	#[test]
-	fn encode_anim_allows_exactly_frame_limit(){
+	fn encode_anim_allows_exactly_frame_limit() {
 		// オフバイワン修正の回帰テスト:ちょうどANIMATION_FRAMES_LIMIT枚は成功する
 		// (修正前は`allow_frames`が1000枚目で0になり誤ってFramesLimitエラーになっていた)。
-		let frames:Vec<_>=(0..ANIMATION_FRAMES_LIMIT).map(|_|make_frame()).collect();
-		let frames=image::Frames::new(Box::new(frames.into_iter()));
-		let ctx=test_request_context(1_000_000);
-		let resp=ctx.encode_anim(frames,0);
-		assert_eq!(resp.status(),axum::http::StatusCode::OK);
+		let frames: Vec<_> = (0..ANIMATION_FRAMES_LIMIT).map(|_| make_frame()).collect();
+		let frames = image::Frames::new(Box::new(frames.into_iter()));
+		let ctx = test_request_context(1_000_000);
+		let resp = ctx.encode_anim(frames, 0);
+		assert_eq!(resp.status(), axum::http::StatusCode::OK);
 	}
 	#[test]
-	fn encode_anim_rejects_over_frame_limit(){
-		let frames:Vec<_>=(0..ANIMATION_FRAMES_LIMIT+1).map(|_|make_frame()).collect();
-		let frames=image::Frames::new(Box::new(frames.into_iter()));
-		let ctx=test_request_context(1_000_000);
-		let resp=ctx.encode_anim(frames,0);
-		assert_eq!(resp.status(),axum::http::StatusCode::BAD_GATEWAY);
-		let err=resp.headers().get("X-Proxy-Error").unwrap().to_str().unwrap();
-		assert!(err.contains(format!("FramesLimit {}",ANIMATION_FRAMES_LIMIT).as_str()),"{}",err);
+	fn encode_anim_rejects_over_frame_limit() {
+		let frames: Vec<_> = (0..ANIMATION_FRAMES_LIMIT + 1)
+			.map(|_| make_frame())
+			.collect();
+		let frames = image::Frames::new(Box::new(frames.into_iter()));
+		let ctx = test_request_context(1_000_000);
+		let resp = ctx.encode_anim(frames, 0);
+		assert_eq!(resp.status(), axum::http::StatusCode::BAD_GATEWAY);
+		let err = resp
+			.headers()
+			.get("X-Proxy-Error")
+			.unwrap()
+			.to_str()
+			.unwrap();
+		assert!(
+			err.contains(format!("FramesLimit {}", ANIMATION_FRAMES_LIMIT).as_str()),
+			"{}",
+			err
+		);
 	}
 }
