@@ -6,12 +6,16 @@ fn main() {
 		.build()
 		.unwrap();
 	let client = reqwest::Client::builder();
-	let client = client.timeout(std::time::Duration::from_millis(500));
+	// Never honour HTTP(S)_PROXY/ALL_PROXY: a loopback probe must reach healthz
+	// directly instead of being rerouted through any operator-exported proxy.
+	let client = client.no_proxy();
+	let client = client.timeout(std::time::Duration::from_millis(400));
 	let client = client.build().unwrap();
-	// Only asks the proxy whether it is serving. Must not fetch through the
-	// proxy: the SSRF policy denies loopback, which is where the container's
-	// own healthcheck can reach.
-	for _ in 0..20 {
+	// Fail fast. This runs as Docker's HEALTHCHECK (see Dockerfile) whose timeout
+	// is 3s, so the total budget here must stay well under it. Cold-start
+	// readiness is handled by HEALTHCHECK --start-period and by the build-time
+	// wait loop, not by a long retry loop in this binary. Budget: 3*400ms + 2*100ms.
+	for attempt in 0..3 {
 		let target_url = target_url.clone();
 		let client = client.clone();
 		let status = rt.block_on(async move {
@@ -24,7 +28,9 @@ fn main() {
 			println!("ok");
 			std::process::exit(0);
 		}
-		std::thread::sleep(std::time::Duration::from_millis(250));
+		if attempt < 2 {
+			std::thread::sleep(std::time::Duration::from_millis(100));
+		}
 	}
 	println!("healthcheck failed");
 	std::process::exit(1);
