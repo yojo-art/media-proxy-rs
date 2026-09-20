@@ -588,6 +588,10 @@ impl RequestContext {
 			}
 		}
 		let status = resp.status();
+		// リモートがエラーを返したら本文をデコードせずエラーを返す
+		if !status.is_success() {
+			return Err(self.remote_error_response(status));
+		}
 		let resp = PreDataStream::new(resp).await;
 		if let Some(Ok(head)) = resp.head.as_ref() {
 			//utf8にパースできて空白文字を削除した後の先頭部分が<svgの場合はsvg
@@ -776,50 +780,56 @@ impl RequestContext {
 				.into_response());
 		}
 		let body = axum::body::Body::from_stream(resp);
-		if status.is_success() {
-			self.headers.remove("Cache-Control");
-			self.headers.append(
-				"Cache-Control",
-				"max-age=31536000, immutable".parse().unwrap(),
-			);
-			if status == reqwest::StatusCode::PARTIAL_CONTENT {
-				Ok((
-					axum::http::StatusCode::PARTIAL_CONTENT,
-					self.headers.clone(),
-					body,
-				))
-			} else {
-				Ok((axum::http::StatusCode::OK, self.headers.clone(), body))
-			}
+		// ここまで来た時点で status.is_success() は保証されている
+		// (encode()冒頭でエラーは remote_error_response に流れる)。
+		self.headers.remove("Cache-Control");
+		self.headers.append(
+			"Cache-Control",
+			"max-age=31536000, immutable".parse().unwrap(),
+		);
+		if status == reqwest::StatusCode::PARTIAL_CONTENT {
+			Ok((
+				axum::http::StatusCode::PARTIAL_CONTENT,
+				self.headers.clone(),
+				body,
+			))
 		} else {
-			self.headers.append(
-				"X-Proxy-Error",
-				format!("status:{}", status.as_u16()).parse().unwrap(),
-			);
-			Err(if self.parms.fallback.is_some() {
-				self.headers.remove("Content-Type");
-				self.headers
-					.append("Content-Type", "image/png".parse().unwrap());
-				(
-					axum::http::StatusCode::OK,
-					self.headers.clone(),
-					(*self.dummy_img).clone(),
-				)
-					.into_response()
-			} else {
-				let status = match status {
-					reqwest::StatusCode::BAD_REQUEST => axum::http::StatusCode::BAD_REQUEST,
-					reqwest::StatusCode::FORBIDDEN => axum::http::StatusCode::FORBIDDEN,
-					reqwest::StatusCode::NOT_FOUND => axum::http::StatusCode::NOT_FOUND,
-					reqwest::StatusCode::REQUEST_TIMEOUT => axum::http::StatusCode::GATEWAY_TIMEOUT,
-					reqwest::StatusCode::GONE => axum::http::StatusCode::GONE,
-					reqwest::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS => {
-						axum::http::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
-					}
-					_ => axum::http::StatusCode::BAD_GATEWAY,
-				};
-				(status, self.headers.clone()).into_response()
-			})
+			Ok((axum::http::StatusCode::OK, self.headers.clone(), body))
+		}
+	}
+	/// リモートからのエラーはエラーとして返す
+	/// Content-Length/Content-Range を残すと空ボディと矛盾して壊れるから消す
+	fn remote_error_response(mut self, status: reqwest::StatusCode) -> axum::response::Response {
+		self.headers.remove("Content-Length");
+		self.headers.remove("Content-Range");
+		self.headers.remove("Accept-Ranges");
+		self.headers.append(
+			"X-Proxy-Error",
+			format!("status:{}", status.as_u16()).parse().unwrap(),
+		);
+		if self.parms.fallback.is_some() {
+			self.headers.remove("Content-Type");
+			self.headers
+				.append("Content-Type", "image/png".parse().unwrap());
+			(
+				axum::http::StatusCode::OK,
+				self.headers.clone(),
+				(*self.dummy_img).clone(),
+			)
+				.into_response()
+		} else {
+			let status = match status {
+				reqwest::StatusCode::BAD_REQUEST => axum::http::StatusCode::BAD_REQUEST,
+				reqwest::StatusCode::FORBIDDEN => axum::http::StatusCode::FORBIDDEN,
+				reqwest::StatusCode::NOT_FOUND => axum::http::StatusCode::NOT_FOUND,
+				reqwest::StatusCode::REQUEST_TIMEOUT => axum::http::StatusCode::GATEWAY_TIMEOUT,
+				reqwest::StatusCode::GONE => axum::http::StatusCode::GONE,
+				reqwest::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS => {
+					axum::http::StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS
+				}
+				_ => axum::http::StatusCode::BAD_GATEWAY,
+			};
+			(status, self.headers.clone()).into_response()
 		}
 	}
 	async fn load_all(&mut self, mut resp: PreDataStream) -> Result<(), axum::response::Response> {
