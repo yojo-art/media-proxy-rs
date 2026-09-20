@@ -437,6 +437,9 @@ impl RequestContext {
 							}
 						}
 					}
+					Some(Ok("image/x-mng")) => {
+						return self.encode_mng();
+					}
 					_ => {
 						self.headers.append(
 							"X-Proxy-Error",
@@ -705,6 +708,37 @@ impl RequestContext {
 			return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response();
 		}
 		let frames = image::Frames::new(Box::new(collected.into_iter()));
+		self.encode_anim(frames, loop_count)
+	}
+	fn format_error_response(
+		&mut self,
+		msg: String,
+		fallback: &'static str,
+	) -> axum::response::Response {
+		self.headers
+			.append("X-Proxy-Error", error_header_value(msg, fallback));
+		(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
+	}
+	/// アニメはAPNG/GIF等と同じくアニメWebPへ再エンコード
+	fn encode_mng(&mut self) -> axum::response::Response {
+		let first_frame_only = self.parms.r#static.is_some() || self.parms.badge.is_some();
+		let anim = match crate::mng::decode(
+			&self.src_bytes,
+			self.max_decode_pixels(),
+			ANIMATION_FRAMES_LIMIT,
+			first_frame_only,
+		) {
+			Ok(anim) => anim,
+			Err(e) => return self.format_error_response(format!("MngAnim {}", e), "MngError"),
+		};
+		if first_frame_only || anim.frames.len() == 1 {
+			if let Some(frame) = anim.frames.into_iter().next() {
+				return self.response_img(DynamicImage::ImageRgba8(frame.into_buffer()));
+			}
+			return self.format_error_response("NoAvailableFrames".to_owned(), "MngError");
+		}
+		let loop_count = anim.loop_count;
+		let frames = image::Frames::new(Box::new(anim.frames.into_iter().map(Ok)));
 		self.encode_anim(frames, loop_count)
 	}
 	fn encode_anim(&self, frames: image::Frames, loop_count: u32) -> axum::response::Response {
@@ -985,6 +1019,14 @@ fn jpegxr_img(
 		}
 		_ => None,
 	}
+}
+
+/// 外部由来バイトを含むエラーの`X-Proxy-Error`値を生成
+///
+/// ヘッダ不正文字を含む場合があり、unwrapしてはならない(finding #3)
+fn error_header_value(msg: String, fallback: &'static str) -> reqwest::header::HeaderValue {
+	reqwest::header::HeaderValue::from_bytes(msg.as_bytes())
+		.unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(fallback))
 }
 
 /// jxl-oxideのエラーから `X-Proxy-Error` 値を組み立てる。

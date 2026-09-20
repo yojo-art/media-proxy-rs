@@ -8,6 +8,7 @@ use tokio_stream::StreamExt;
 mod browsersafe;
 mod image_test;
 mod img;
+mod mng;
 mod ssrf;
 mod svg;
 
@@ -608,6 +609,7 @@ impl RequestContext {
 							"image/x-targa" | "image/x-tga" => {
 								self.codec = Ok(image::ImageFormat::Tga)
 							}
+							"application/pdf" => is_img = true,
 							_ => {}
 						}
 					}
@@ -634,6 +636,12 @@ impl RequestContext {
 						self.headers.remove("Content-Type");
 						self.headers
 							.append("Content-Type", "image/jxr".parse().unwrap());
+					}
+					if head.starts_with(&crate::mng::SIGNATURE) {
+						is_img = true;
+						self.headers.remove("Content-Type");
+						self.headers
+							.append("Content-Type", "image/x-mng".parse().unwrap());
 					}
 				}
 			}
