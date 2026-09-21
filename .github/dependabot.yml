@@ -1,0 +1,46 @@
+version: 2
+
+# public.ecr.aws は匿名読み取り可能な公開レジストリ。認証なしで digest を追従するため
+# 名前付きレジストリとして宣言し、docker エコシステムから参照する (L-10)。
+registries:
+  ecr-public:
+    type: docker_registry
+    url: https://public.ecr.aws
+
+updates:
+  # Rust 依存 (Cargo.toml / Cargo.lock)。既存の Cargo.lock 追跡と rev 固定と合わせ、
+  # 依存の脆弱性/陳腐化を更新 PR で拾う。
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions を commit SHA 参照で維持する。タグ参照 (例 `@v7`) はタグの
+  # 付け替え (tag mutation) に耐えないため、SHA 固定したうえで dependabot が SHA を
+  # 追従更新し、変更履歴として version コメントを残す。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # ベースイメージ (rust:latest / alpine:latest) を digest 参照で追従。`latest` の
+  # ような可変タグはビルド再現性を損なうため、Dockerfile 側を `image@sha256:...` に
+  # 固定したうえで digest の更新をここで受け取る。
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+    schedule:
+      interval: "weekly"
+    registries:
+      - ecr-public
+    groups:
+      docker-minor-patch:
+        update-types: ["minor", "patch"]
