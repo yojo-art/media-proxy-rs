@@ -1,5 +1,12 @@
 use core::str;
-use std::{io::Write, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
+use std::{
+	io::Write,
+	net::SocketAddr,
+	path::{Path, PathBuf},
+	pin::Pin,
+	str::FromStr,
+	sync::Arc,
+};
 
 use axum::{http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
@@ -35,6 +42,9 @@ pub struct ConfigFile {
 	allowed_networks: Option<Vec<String>>,
 	blocked_networks: Option<Vec<String>>,
 	blocked_hosts: Option<Vec<String>>,
+	/// Octal permission bits for a `unix://` `bind_addr` socket, e.g. `"0660"`.
+	/// Defaults to `0666` (existing behavior) when unset.
+	unix_socket_permissions: Option<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct RequestParams {
@@ -133,6 +143,7 @@ fn main() {
 			allowed_networks:None,
 			blocked_networks:None,
 			blocked_hosts:None,
+			unix_socket_permissions:None,
 		};
 		let default_config = serde_json::to_string_pretty(&default_config).unwrap();
 		std::fs::File::create(&config_path)
@@ -169,6 +180,18 @@ fn main() {
 		eprintln!("invalid network configuration: {}", e);
 		std::process::exit(1);
 	}
+	// Resolved up front (not inside serve_on_unix_socket) so a bad value is a
+	// startup error, consistent with the network config validation above.
+	let unix_socket_mode: u32 = match &config.unix_socket_permissions {
+		Some(s) => match parse_unix_socket_mode(s) {
+			Ok(mode) => mode,
+			Err(e) => {
+				eprintln!("invalid unix_socket_permissions: {}", e);
+				std::process::exit(1);
+			}
+		},
+		None => 0o666,
+	};
 	let dummy_png = Arc::new(include_bytes!("../asset/dummy.png").to_vec());
 	let config = Arc::new(config);
 	let rt = tokio::runtime::Builder::new_multi_thread()
@@ -232,16 +255,7 @@ fn main() {
 	let fontdb = Arc::new(fontdb);
 	let arg_tup = (client, config, dummy_png, fontdb);
 	rt.block_on(async {
-		// bind_addr のパース失敗は設定ミス。メッセージなしの panic を避け説明付きで
-		// 終了する (L-11)。
-		let http_addr: SocketAddr = match arg_tup.1.bind_addr.parse() {
-			Ok(addr) => addr,
-			Err(e) => {
-				eprintln!("invalid bind_addr {:?}: {}", arg_tup.1.bind_addr, e);
-				std::process::exit(1);
-			}
-		};
-		let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+		let bind_addr = arg_tup.1.bind_addr.clone();
 		let app = Router::new();
 		// Liveness probe that never touches the fetch path: the SSRF policy
 		// denies loopback by default, so a self-check going through get_file
@@ -267,14 +281,152 @@ fn main() {
 		// A single bad request must not kill the process (finding #3).
 		// With panic="abort" removed, this layer turns handler panics into 500s.
 		let app = app.layer(tower_http::catch_panic::CatchPanicLayer::new());
-		axum::serve(
-			listener,
-			app.into_make_service_with_connect_info::<SocketAddr>(),
-		)
+		// NOTE: handlers do not use ConnectInfo, so plain into_make_service()
+		// works for both TCP and UDS listeners.
+		match parse_bind_addr(&bind_addr) {
+			Ok(BindTarget::Tcp(addr)) => {
+				let listener = match tokio::net::TcpListener::bind(addr).await {
+					Ok(listener) => listener,
+					Err(e) => {
+						eprintln!("failed to bind TCP {}: {}", addr, e);
+						std::process::exit(1);
+					}
+				};
+				eprintln!("listening on {}", addr);
+				axum::serve(listener, app.into_make_service())
+					.with_graceful_shutdown(shutdown_signal())
+					.await
+					.unwrap();
+			}
+			Ok(BindTarget::Unix(path)) => {
+				#[cfg(not(unix))]
+				{
+					let _ = &path;
+					eprintln!("unix domain socket is only supported on unix platforms");
+					std::process::exit(1);
+				}
+				#[cfg(unix)]
+				{
+					serve_on_unix_socket(app, &path, unix_socket_mode).await;
+				}
+			}
+			Err(e) => {
+				eprintln!("{}", e);
+				std::process::exit(1);
+			}
+		}
+	});
+}
+
+/// Where to listen, decided by `bind_addr`.
+enum BindTarget {
+	Tcp(SocketAddr),
+	Unix(PathBuf),
+}
+
+/// Canonical form is `unix:///path/to/sock` (or `unix:/path/to/sock`).
+/// For compatibility a bare absolute path such as `/var/run/.../proxy.sock`
+/// is also accepted as UDS, with a deprecation warning telling the operator
+/// to add the `unix://` prefix. Anything else must parse as `SocketAddr`.
+fn parse_bind_addr(s: &str) -> Result<BindTarget, String> {
+	let s = s.trim();
+	if let Some(rest) = s.strip_prefix("unix://") {
+		if rest.is_empty() {
+			return Err(format!("invalid bind_addr {:?}: empty socket path", s));
+		}
+		return Ok(BindTarget::Unix(PathBuf::from(rest)));
+	}
+	if let Some(rest) = s.strip_prefix("unix:") {
+		if rest.is_empty() {
+			return Err(format!("invalid bind_addr {:?}: empty socket path", s));
+		}
+		return Ok(BindTarget::Unix(PathBuf::from(rest)));
+	}
+	if let Ok(addr) = s.parse::<SocketAddr>() {
+		return Ok(BindTarget::Tcp(addr));
+	}
+	// Compatibility fallback so the earlier bare-path form keeps working.
+	if s.contains('/') || s.ends_with(".sock") {
+		eprintln!(
+			"WARNING: bind_addr {:?} has no scheme; treating it as a unix socket. Use \"unix://{}\" instead.",
+			s, s
+		);
+		return Ok(BindTarget::Unix(PathBuf::from(s)));
+	}
+	Err(format!(
+		"invalid bind_addr {:?}: expected \"IP:port\" or \"unix:///path/to.sock\"",
+		s
+	))
+}
+
+/// Parses `unix_socket_permissions` (e.g. `"0666"`, `"660"`, `"0o600"`) as
+/// octal permission bits. Accepts an optional `0o` prefix.
+fn parse_unix_socket_mode(s: &str) -> Result<u32, String> {
+	let s = s.trim();
+	let digits = s.strip_prefix("0o").unwrap_or(s);
+	if digits.is_empty() || !digits.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+		return Err(format!("{:?}: expected octal permission bits", s));
+	}
+	let mode = u32::from_str_radix(digits, 8).map_err(|e| format!("{:?}: {}", s, e))?;
+	if mode > 0o777 {
+		return Err(format!("{:?}: out of range (expected 0..=0777)", s));
+	}
+	Ok(mode)
+}
+
+/// Bind a UDS listener: create parent dirs, drop a stale socket file left by
+/// an unclean shutdown, then chmod to `mode` (default `0666`, configurable via
+/// `unix_socket_permissions`) so a reverse proxy running as a different user
+/// can connect.
+#[cfg(unix)]
+async fn serve_on_unix_socket(app: Router, path: &Path, mode: u32) {
+	use std::os::unix::fs::PermissionsExt;
+	if let Some(parent) = path.parent() {
+		if !parent.as_os_str().is_empty() {
+			if let Err(e) = tokio::fs::create_dir_all(parent).await {
+				eprintln!(
+					"failed to create socket parent dir {}: {}",
+					parent.display(),
+					e
+				);
+				std::process::exit(1);
+			}
+		}
+	}
+	match tokio::fs::symlink_metadata(path).await {
+		Ok(_) => {
+			if let Err(e) = tokio::fs::remove_file(path).await {
+				eprintln!("failed to remove stale socket {}: {}", path.display(), e);
+				std::process::exit(1);
+			}
+		}
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+		Err(e) => {
+			eprintln!("failed to stat socket path {}: {}", path.display(), e);
+			std::process::exit(1);
+		}
+	}
+	let listener = match tokio::net::UnixListener::bind(path) {
+		Ok(listener) => listener,
+		Err(e) => {
+			eprintln!("failed to bind unix socket {}: {}", path.display(), e);
+			std::process::exit(1);
+		}
+	};
+	if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+		eprintln!(
+			"failed to chmod {:o} socket {}: {}",
+			mode,
+			path.display(),
+			e
+		);
+		std::process::exit(1);
+	}
+	eprintln!("listening on unix://{}", path.display());
+	axum::serve(listener, app.into_make_service())
 		.with_graceful_shutdown(shutdown_signal())
 		.await
 		.unwrap();
-	});
 }
 /// 外部に返す `X-Proxy-Error` は固定トークンのみ (P-03: 到達性/内部アドレスの
 /// オラクル化を防ぐ)。詳細な原因 (DNS のエラー種別、解決済みホスト名など) は
@@ -987,7 +1139,7 @@ impl RequestContext {
 					eprintln!("load_all failed: {:?}", e);
 					self.headers.append(
 						"X-Proxy-Error",
-						error_header_value(format!("LoadAll:{:?}", e),"LoadAll"),
+						error_header_value(format!("LoadAll:{:?}", e), "LoadAll"),
 					);
 					return Err(
 						(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()

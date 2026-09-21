@@ -524,6 +524,7 @@ mod tests {
 			allowed_networks: None,
 			blocked_networks: None,
 			blocked_hosts: None,
+			unix_socket_permissions: None,
 		}
 	}
 

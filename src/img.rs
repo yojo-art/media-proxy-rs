@@ -1,7 +1,7 @@
 use axum::response::IntoResponse;
 use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
 
-use crate::{RequestContext, error_header_value};
+use crate::{error_header_value, RequestContext};
 
 /// `error_header_value` の、フォールバック静的トークンを指定できる版。
 pub(crate) fn error_header_value_or(
@@ -411,7 +411,10 @@ impl RequestContext {
 							Err(e) => {
 								self.headers.append(
 									"X-Proxy-Error",
-									error_header_value(format!("Jpeg2000 Error:{:?}", e),"Jpeg2000 Error"),
+									error_header_value(
+										format!("Jpeg2000 Error:{:?}", e),
+										"Jpeg2000 Error",
+									),
 								);
 								return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 									.into_response();
@@ -468,7 +471,10 @@ impl RequestContext {
 							Ok(Err(e)) => {
 								self.headers.append(
 									"X-Proxy-Error",
-									error_header_value(format!("JpegXR decode pixels {:?}", e),"JpegXR decode pixels"),
+									error_header_value(
+										format!("JpegXR decode pixels {:?}", e),
+										"JpegXR decode pixels",
+									),
 								);
 								return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 									.into_response();
@@ -476,7 +482,10 @@ impl RequestContext {
 							Err(e) => {
 								self.headers.append(
 									"X-Proxy-Error",
-									error_header_value(format!("JpegXR decode bytes {:?}", e),"JpegXR decode bytes"),
+									error_header_value(
+										format!("JpegXR decode bytes {:?}", e),
+										"JpegXR decode bytes",
+									),
 								);
 								return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 									.into_response();
@@ -489,7 +498,7 @@ impl RequestContext {
 					_ => {
 						self.headers.append(
 							"X-Proxy-Error",
-							error_header_value(format!("CodecError:{:?}", e),"CodecError"),
+							error_header_value(format!("CodecError:{:?}", e), "CodecError"),
 						);
 						return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 							.into_response();
@@ -908,7 +917,7 @@ impl RequestContext {
 			Err(e) => {
 				self.headers.append(
 					"X-Proxy-Error",
-					error_header_value(format!("DecodeError_{}", e),"DecodeError"),
+					error_header_value(format!("DecodeError_{}", e), "DecodeError"),
 				);
 				return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response();
 			}
@@ -960,7 +969,7 @@ impl RequestContext {
 					Err(e) => {
 						self.headers.append(
 							"X-Proxy-Error",
-							error_header_value(format!("EncodeError_{:?}", e),"EncodeError"),
+							error_header_value(format!("EncodeError_{:?}", e), "EncodeError"),
 						);
 						(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
 					}
@@ -979,7 +988,7 @@ impl RequestContext {
 			Err(e) => {
 				self.headers.append(
 					"X-Proxy-Error",
-					error_header_value(format!("EncodeError_{:?}", e),"EncodeError"),
+					error_header_value(format!("EncodeError_{:?}", e), "EncodeError"),
 				);
 				(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
 			}
@@ -1368,6 +1377,7 @@ mod tests {
 				allowed_networks: None,
 				blocked_networks: None,
 				blocked_hosts: None,
+				unix_socket_permissions: None,
 			}),
 			codec: Err(None),
 			dummy_img: std::sync::Arc::new(Vec::new()),
