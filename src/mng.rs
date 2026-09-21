@@ -208,14 +208,21 @@ pub(crate) fn decode(
 				if data[body + 10] != 8 {
 					return Err(format!("JngCompression {}", data[body + 10]));
 				}
-				// alpha_compression_method: 0=IDAT(PNG), 8=JDAA(JPEG)。alpha_sample_depth は 8bit のみ
+				// alpha_compression_method: 0=IDAT(PNGグレースケール), 8=JDAA(JPEGグレースケール)
+				// ImageMagickのように alpha_sample_depth=1 でアルファ無しを書き出す実装があるため
+				// method=0 のときは 1/2/4bit も受け付け、IDATが無ければ不透明として扱う(libpngと同様)
 				let alpha_method = data[body + 13];
 				let alpha_ok = !matches!(color_type, 12 | 14)
-					|| (matches!(alpha_method, 0 | 8) && data[body + 12] == 8);
+					|| match alpha_method {
+						0 => matches!(data[body + 12], 1 | 2 | 4 | 8),
+						8 => data[body + 12] == 8,
+						_ => false,
+					};
 				if !alpha_ok {
 					return Err(format!(
 						"JngAlpha depth={} method={}",
-						data[body + 12], alpha_method
+						data[body + 12],
+						alpha_method
 					));
 				}
 				jng = Some(JngPending {
@@ -436,8 +443,13 @@ mod tests {
 	fn jpeg_bytes(img: &image::RgbImage) -> Vec<u8> {
 		let mut buf = Vec::new();
 		let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
-		enc.encode(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
-			.unwrap();
+		enc.encode(
+			img.as_raw(),
+			img.width(),
+			img.height(),
+			image::ExtendedColorType::Rgb8,
+		)
+		.unwrap();
 		buf
 	}
 	fn gray_jpeg_bytes(img: &image::GrayImage) -> Vec<u8> {
@@ -529,7 +541,12 @@ mod tests {
 		let got = anim.frames[0].buffer().get_pixel(0, 0).0;
 		let want = expected_jpeg_pixel(&jpeg, 0, 0);
 		for i in 0..3 {
-			assert!((got[i] as i32 - want[i] as i32).abs() <= 1, "{:?} vs {:?}", got, want);
+			assert!(
+				(got[i] as i32 - want[i] as i32).abs() <= 1,
+				"{:?} vs {:?}",
+				got,
+				want
+			);
 		}
 		assert_eq!(got[3], 255);
 	}
@@ -567,7 +584,10 @@ mod tests {
 		v.extend_from_slice(&mhdr(4, 4, 100));
 		v.extend_from_slice(&jhdr(4, 4, 14, 8, 0));
 		v.extend_from_slice(&chunk(b"JDAT", &jpeg));
-		v.extend_from_slice(&chunk(b"IDAT", &alpha_idat(&image::GrayImage::from_pixel(4, 4, image::Luma([255u8])))));
+		v.extend_from_slice(&chunk(
+			b"IDAT",
+			&alpha_idat(&image::GrayImage::from_pixel(4, 4, image::Luma([255u8]))),
+		));
 		v.extend_from_slice(&chunk(b"JSEP", &[0u8; 2]));
 		// 12bit列は完全に無視されること(壊れたJPEGでも読まない)
 		v.extend_from_slice(&chunk(b"JDAT", b"not jpeg at all"));
@@ -592,7 +612,12 @@ mod tests {
 		let want = expected_jpeg_pixel(&jpeg, 0, 0);
 		let got = anim.frames[1].buffer().get_pixel(0, 0).0;
 		for i in 0..3 {
-			assert!((got[i] as i32 - want[i] as i32).abs() <= 1, "{:?} vs {:?}", got, want);
+			assert!(
+				(got[i] as i32 - want[i] as i32).abs() <= 1,
+				"{:?} vs {:?}",
+				got,
+				want
+			);
 		}
 	}
 	#[test]
@@ -612,7 +637,12 @@ mod tests {
 		let want = expected_jpeg_pixel(&jpeg, 0, 0);
 		let got = canvas.get_pixel(1, 1).0;
 		for i in 0..3 {
-			assert!((got[i] as i32 - want[i] as i32).abs() <= 1, "{:?} vs {:?}", got, want);
+			assert!(
+				(got[i] as i32 - want[i] as i32).abs() <= 1,
+				"{:?} vs {:?}",
+				got,
+				want
+			);
 		}
 		assert_eq!(got[3], 255);
 	}
@@ -626,6 +656,19 @@ mod tests {
 		let mut t = b"IHDR".to_vec();
 		t.extend_from_slice(&ihdr);
 		assert_eq!(crc32(&t), 2358952354);
+	}
+	#[test]
+	fn jng_alpha_absent_is_opaque() {
+		// ImageMagickは ct=14, alpha_depth=1, method=0 でアルファ無しを書き出す
+		let jpeg = jpeg_bytes(&image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0])));
+		let mut v = SIGNATURE.to_vec();
+		v.extend_from_slice(&mhdr(4, 4, 100));
+		v.extend_from_slice(&jhdr(4, 4, 14, 1, 0));
+		v.extend_from_slice(&chunk(b"JDAT", &jpeg));
+		v.extend_from_slice(&chunk(b"IEND", &[]));
+		v.extend_from_slice(&chunk(b"MEND", &[]));
+		let anim = decode(&v, 1_000_000, 1000, false).unwrap();
+		assert_eq!(anim.frames[0].buffer().get_pixel(0, 0).0[3], 255);
 	}
 	#[test]
 	fn jng_bad_compression_is_err() {
