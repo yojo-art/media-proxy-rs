@@ -5,6 +5,7 @@
 use crate::img::dimensions_allowed_for;
 
 pub(crate) const SIGNATURE: [u8; 8] = [0x8a, 0x4d, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+pub(crate) const JNG_SIGNATURE: [u8; 8] = [0x8b, 0x4a, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
 pub(crate) struct MngAnimation {
@@ -44,6 +45,26 @@ pub(crate) fn decode(
 	frames_limit: u64,
 	first_frame_only: bool,
 ) -> Result<MngAnimation, String> {
+	// 単体JNG(0x8b JNG)はMNGコンテナで包んで単一フレームとして扱う
+	if data.starts_with(&JNG_SIGNATURE) {
+		if data.len() < 24 {
+			return Err("JngTooShort".to_owned());
+		}
+		let width = be32(data, 16);
+		let height = be32(data, 20);
+		let mut wrapped = Vec::with_capacity(data.len() + 64);
+		wrapped.extend_from_slice(&SIGNATURE);
+		let mut mhdr = Vec::with_capacity(28);
+		mhdr.extend_from_slice(&width.to_be_bytes());
+		mhdr.extend_from_slice(&height.to_be_bytes());
+		mhdr.extend_from_slice(&100u32.to_be_bytes());
+		mhdr.extend_from_slice(&[0u8; 16]);
+		wrapped.extend_from_slice(&png_chunk(b"MHDR", &mhdr));
+		// JNGシグネチャ以降のチャンク列(JHDR..IEND)をそのまま埋め込む
+		wrapped.extend_from_slice(&data[8..]);
+		wrapped.extend_from_slice(&png_chunk(b"MEND", &[]));
+		return decode(&wrapped, max_decode_pixels, frames_limit, first_frame_only);
+	}
 	if !data.starts_with(&SIGNATURE) {
 		return Err("BadSignature".to_owned());
 	}
@@ -549,6 +570,54 @@ mod tests {
 			);
 		}
 		assert_eq!(got[3], 255);
+	}
+	#[test]
+	fn standalone_jng_decodes() {
+		let jpeg = jpeg_bytes(&image::RgbImage::from_pixel(
+			4,
+			4,
+			image::Rgb([0, 128, 255]),
+		));
+		let mut v = JNG_SIGNATURE.to_vec();
+		v.extend_from_slice(&jng_object(4, 4, &jpeg, &[], &[]));
+		let anim = decode(&v, 1_000_000, 1000, false).unwrap();
+		assert_eq!(anim.frames.len(), 1);
+		let got = anim.frames[0].buffer().get_pixel(0, 0).0;
+		let want = expected_jpeg_pixel(&jpeg, 0, 0);
+		for i in 0..3 {
+			assert!(
+				(got[i] as i32 - want[i] as i32).abs() <= 1,
+				"{:?} vs {:?}",
+				got,
+				want
+			);
+		}
+		assert_eq!(got[3], 255);
+	}
+	#[test]
+	fn standalone_jng_alpha_decodes() {
+		let jpeg = jpeg_bytes(&image::RgbImage::from_pixel(4, 4, image::Rgb([10, 20, 30])));
+		// グラデーションのアルファマスク(PNGグレースケールIDAT, 可逆)
+		let mut gray = image::GrayImage::from_pixel(4, 4, image::Luma([0]));
+		for x in 0..4 {
+			gray.put_pixel(x, 0, image::Luma([(x * 80) as u8]));
+		}
+		let alpha_idat = alpha_idat(&gray);
+		let mut v = JNG_SIGNATURE.to_vec();
+		v.extend_from_slice(&jng_object(4, 4, &jpeg, &alpha_idat, &[]));
+		let anim = decode(&v, 1_000_000, 1000, false).unwrap();
+		assert_eq!(anim.frames.len(), 1);
+		let buf = anim.frames[0].buffer();
+		assert_eq!(buf.get_pixel(0, 0).0[3], 0);
+		assert_eq!(buf.get_pixel(1, 0).0[3], 80);
+		assert_eq!(buf.get_pixel(2, 0).0[3], 160);
+		assert_eq!(buf.get_pixel(3, 0).0[3], 240);
+	}
+	#[test]
+	fn standalone_jng_too_short_is_err() {
+		let mut v = JNG_SIGNATURE.to_vec();
+		v.extend_from_slice(&[0u8; 8]);
+		assert!(decode(&v, 1_000_000, 1000, false).is_err());
 	}
 	#[test]
 	fn jng_idat_alpha_applies() {

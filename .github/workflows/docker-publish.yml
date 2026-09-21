@@ -277,6 +277,8 @@ jobs:
           magick asset/dummy.png ${{ runner.temp }}/http/mng.mng
           # JNG(JPEGメンバー)を埋め込んだMNGはImageMagickで生成できないためPythonで合成する
           magick asset/dummy.png -flatten ${{ runner.temp }}/jng-member.jng
+          # 単体JNGファイル(.jng)もデコード対象
+          cp ${{ runner.temp }}/jng-member.jng ${{ runner.temp }}/http/jng.jng
           python3 <<'PYEOF'
           import os, struct, zlib
           def chunk(t, b):

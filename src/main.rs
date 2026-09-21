@@ -899,6 +899,13 @@ impl RequestContext {
 						self.headers
 							.append("Content-Type", "image/x-mng".parse().unwrap());
 					}
+					// 単体JNGもMNG経路(decode内でコンテナ包装)で処理
+					if head.starts_with(&crate::mng::JNG_SIGNATURE) {
+						is_img = true;
+						self.headers.remove("Content-Type");
+						self.headers
+							.append("Content-Type", "image/x-mng".parse().unwrap());
+					}
 					// guess_format非対応のavisブランド
 					#[cfg(feature = "avif-decoder")]
 					if crate::avif_seq::is_avif_sequence(head) {
