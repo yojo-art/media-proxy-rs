@@ -987,7 +987,7 @@ impl RequestContext {
 					eprintln!("load_all failed: {:?}", e);
 					self.headers.append(
 						"X-Proxy-Error",
-						img::error_header_value(format!("LoadAll:{:?}", e)),
+						error_header_value(format!("LoadAll:{:?}", e),"LoadAll"),
 					);
 					return Err(
 						(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
@@ -1035,4 +1035,12 @@ impl futures::stream::Stream for PreDataStream {
 		}
 		r.last.as_mut().poll_next(cx)
 	}
+}
+
+/// 外部由来バイトを含むエラーの`X-Proxy-Error`値を生成
+///
+/// ヘッダ不正文字を含む場合があり、unwrapしてはならない(finding #3)
+fn error_header_value(msg: String, fallback: &'static str) -> reqwest::header::HeaderValue {
+	reqwest::header::HeaderValue::from_bytes(msg.as_bytes())
+		.unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(fallback))
 }

@@ -1,15 +1,7 @@
 use axum::response::IntoResponse;
 use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
 
-use crate::RequestContext;
-
-/// 依存クレート/外部データ由来のエラーメッセージから `X-Proxy-Error` の値を組み立てる。
-/// zune-core の `Debug` 実装 (`writeln!` で末尾に改行を付与) のように、依存クレートの
-/// 手書き `Debug`/`Display` は `HeaderValue` が拒否する制御文字を含み得るため、
-/// 生成した文字列を直接 `.parse().unwrap()` してはならない (P-01)。
-pub(crate) fn error_header_value(msg: impl AsRef<str>) -> reqwest::header::HeaderValue {
-	error_header_value_or(msg, "DecodeError")
-}
+use crate::{RequestContext, error_header_value};
 
 /// `error_header_value` の、フォールバック静的トークンを指定できる版。
 pub(crate) fn error_header_value_or(
@@ -419,7 +411,7 @@ impl RequestContext {
 							Err(e) => {
 								self.headers.append(
 									"X-Proxy-Error",
-									error_header_value(format!("Jpeg2000 Error:{:?}", e)),
+									error_header_value(format!("Jpeg2000 Error:{:?}", e),"Jpeg2000 Error"),
 								);
 								return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 									.into_response();
@@ -476,7 +468,7 @@ impl RequestContext {
 							Ok(Err(e)) => {
 								self.headers.append(
 									"X-Proxy-Error",
-									error_header_value(format!("JpegXR decode pixels {:?}", e)),
+									error_header_value(format!("JpegXR decode pixels {:?}", e),"JpegXR decode pixels"),
 								);
 								return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 									.into_response();
@@ -484,7 +476,7 @@ impl RequestContext {
 							Err(e) => {
 								self.headers.append(
 									"X-Proxy-Error",
-									error_header_value(format!("JpegXR decode bytes {:?}", e)),
+									error_header_value(format!("JpegXR decode bytes {:?}", e),"JpegXR decode bytes"),
 								);
 								return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 									.into_response();
@@ -497,7 +489,7 @@ impl RequestContext {
 					_ => {
 						self.headers.append(
 							"X-Proxy-Error",
-							error_header_value(format!("CodecError:{:?}", e)),
+							error_header_value(format!("CodecError:{:?}", e),"CodecError"),
 						);
 						return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone())
 							.into_response();
@@ -916,7 +908,7 @@ impl RequestContext {
 			Err(e) => {
 				self.headers.append(
 					"X-Proxy-Error",
-					error_header_value(&format!("DecodeError_{}", e)),
+					error_header_value(format!("DecodeError_{}", e),"DecodeError"),
 				);
 				return (axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response();
 			}
@@ -968,7 +960,7 @@ impl RequestContext {
 					Err(e) => {
 						self.headers.append(
 							"X-Proxy-Error",
-							error_header_value(format!("EncodeError_{:?}", e)),
+							error_header_value(format!("EncodeError_{:?}", e),"EncodeError"),
 						);
 						(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
 					}
@@ -987,7 +979,7 @@ impl RequestContext {
 			Err(e) => {
 				self.headers.append(
 					"X-Proxy-Error",
-					error_header_value(format!("EncodeError_{:?}", e)),
+					error_header_value(format!("EncodeError_{:?}", e),"EncodeError"),
 				);
 				(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
 			}
@@ -1089,14 +1081,6 @@ fn jpegxr_img(
 		}
 		_ => None,
 	}
-}
-
-/// 外部由来バイトを含むエラーの`X-Proxy-Error`値を生成
-///
-/// ヘッダ不正文字を含む場合があり、unwrapしてはならない(finding #3)
-fn error_header_value(msg: String, fallback: &'static str) -> reqwest::header::HeaderValue {
-	reqwest::header::HeaderValue::from_bytes(msg.as_bytes())
-		.unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(fallback))
 }
 
 /// jxl-oxideのエラーから `X-Proxy-Error` 値を組み立てる。
