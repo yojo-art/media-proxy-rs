@@ -17,6 +17,8 @@ pub(crate) struct MngAnimation {
 struct JngPending {
 	width: u32,
 	height: u32,
+	/// JHDR color_type (8=Gray, 10=Color, 12=Gray-alpha, 14=Color-alpha)
+	color_type: u8,
 	/// JHDR alpha_compression_method (0=IDATのPNGグレースケール, 8=JDAAのJPEGグレースケール)
 	alpha_method: u8,
 	/// JHDR alpha_sample_depth
@@ -154,7 +156,7 @@ pub(crate) fn decode(
 					data[body + 11],
 				]) as i64;
 			}
-			b"IHDR" if png_start.is_none() => {
+			b"IHDR" if png_start.is_none() && jng.is_none() => {
 				if len >= 8 {
 					let width = be32(data, body);
 					let height = be32(data, body + 4);
@@ -166,15 +168,14 @@ pub(crate) fn decode(
 			}
 			b"IEND" => {
 				let img: image::RgbaImage = if let Some(start) = png_start.take() {
-					canvas.as_ref().ok_or("IhdrBeforeMhdr")?;
-					let frame_count = frames.len() as u64 + 1;
-					if frame_count > frames_limit {
-						return Err(format!("FramesLimit {}>{}", frame_count, frames_limit));
-					}
-					let total = canvas_pixels.saturating_mul(frame_count);
-					if total > max_decode_pixels {
-						return Err(format!("DecodePixels {}>{}", total, max_decode_pixels));
-					}
+					check_frame_budget(
+						canvas.as_ref(),
+						frames.len() as u64 + 1,
+						frames_limit,
+						canvas_pixels,
+						max_decode_pixels,
+						"IhdrBeforeMhdr",
+					)?;
 					let mut png_bytes = Vec::with_capacity(8 + (end - start));
 					png_bytes.extend_from_slice(&PNG_SIGNATURE);
 					png_bytes.extend_from_slice(&data[start..end]);
@@ -182,15 +183,14 @@ pub(crate) fn decode(
 						.map_err(|e| format!("EmbeddedPng {:?}", e))?
 						.into_rgba8()
 				} else if let Some(j) = jng.take() {
-					canvas.as_ref().ok_or("JhdrBeforeMhdr")?;
-					let frame_count = frames.len() as u64 + 1;
-					if frame_count > frames_limit {
-						return Err(format!("FramesLimit {}>{}", frame_count, frames_limit));
-					}
-					let total = canvas_pixels.saturating_mul(frame_count);
-					if total > max_decode_pixels {
-						return Err(format!("DecodePixels {}>{}", total, max_decode_pixels));
-					}
+					check_frame_budget(
+						canvas.as_ref(),
+						frames.len() as u64 + 1,
+						frames_limit,
+						canvas_pixels,
+						max_decode_pixels,
+						"JhdrBeforeMhdr",
+					)?;
 					jng_to_rgba(j)?
 				} else {
 					break;
@@ -214,7 +214,10 @@ pub(crate) fn decode(
 				}
 			}
 			// JNG(JPEG系サブストリーム)。JHDRはMNG/PNGメンバーと排他。
-			b"JHDR" if len >= 16 && png_start.is_none() && jng.is_none() => {
+			b"JHDR" if png_start.is_none() && jng.is_none() => {
+				if len < 16 {
+					return Err(format!("JngHeaderTooShort {}", len));
+				}
 				let width = be32(data, body);
 				let height = be32(data, body + 4);
 				if !dimensions_allowed_for(max_decode_pixels, width as u64, height as u64) {
@@ -249,6 +252,7 @@ pub(crate) fn decode(
 				jng = Some(JngPending {
 					width,
 					height,
+					color_type,
 					alpha_method,
 					alpha_depth: data[body + 12],
 					jpeg: Vec::new(),
@@ -315,17 +319,41 @@ fn png_chunk(ctype: &[u8; 4], body: &[u8]) -> Vec<u8> {
 	v
 }
 
+/// フレーム追加前の予算チェック(MHDR有無・件数・累積ピクセル)。PNG/JNG分岐で共通。
+fn check_frame_budget(
+	canvas: Option<&image::RgbaImage>,
+	frame_count: u64,
+	frames_limit: u64,
+	canvas_pixels: u64,
+	max_decode_pixels: u64,
+	no_canvas_err: &str,
+) -> Result<(), String> {
+	canvas.ok_or(no_canvas_err)?;
+	if frame_count > frames_limit {
+		return Err(format!("FramesLimit {}>{}", frame_count, frames_limit));
+	}
+	let total = canvas_pixels.saturating_mul(frame_count);
+	if total > max_decode_pixels {
+		return Err(format!("DecodePixels {}>{}", total, max_decode_pixels));
+	}
+	Ok(())
+}
+
 /// 収集済みのJNGをRgbaImage化。JPEGをデコードし、アルファマスク(IDAT/JDAA)があれば適用。
 fn jng_to_rgba(j: JngPending) -> Result<image::RgbaImage, String> {
 	let img = image::load_from_memory_with_format(&j.jpeg, image::ImageFormat::Jpeg)
 		.map_err(|e| format!("JngJpeg {:?}", e))?;
 	let mut rgba = img.into_rgba8();
-	let alpha = match j.alpha_method {
-		0 => decode_alpha_png(&j)?,
-		8 => image::load_from_memory_with_format(&j.alpha_jpeg, image::ImageFormat::Jpeg)
-			.map(|i| Some(i.into_luma8()))
-			.map_err(|e| format!("JngAlphaJpeg {:?}", e))?,
-		_ => None,
+	let alpha = if matches!(j.color_type, 12 | 14) {
+		match j.alpha_method {
+			0 => decode_alpha_png(&j)?,
+			8 => image::load_from_memory_with_format(&j.alpha_jpeg, image::ImageFormat::Jpeg)
+				.map(|i| Some(i.into_luma8()))
+				.map_err(|e| format!("JngAlphaJpeg {:?}", e))?,
+			_ => None,
+		}
+	} else {
+		None
 	};
 	if let Some(alpha) = alpha {
 		if alpha.width() != rgba.width() || alpha.height() != rgba.height() {
