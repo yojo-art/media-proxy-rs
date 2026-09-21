@@ -79,4 +79,4 @@ amd64ではデフォルトでx86-64-v3向けにビルドしますが、x86-64-v3
 - JPEG XL(jxl-oxide)
 - JPEG 2000(openjp2)
 - JPEG XR(jxrlib)
-- MNG (MNG-LC規格相当)
+- MNG (MNG-LC規格相当。埋め込まれたJNG(JPEG)メンバーもデコード)
