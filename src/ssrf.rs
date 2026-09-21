@@ -115,13 +115,19 @@ pub(crate) async fn cached_lookup_host(host: &str) -> std::io::Result<Vec<Socket
 			))
 		}
 	};
-	let lookup = tokio::time::timeout(
-		DNS_LOOKUP_TIMEOUT,
-		tokio::net::lookup_host(format!("{}:0", host)),
-	)
-	.await;
-	match lookup {
-		Ok(Ok(resolved)) => {
+	// tokio::net::lookup_host は getaddrinfo(3) を spawn_blocking 上で実行する。
+	// select! で「待つのをやめる」だけでは OS スレッドは完了まで走り続け (キャンセル
+	// 不可)、permit だけが早期解放されて「同時 N 件」の上限が崩れる (P-04)。自前で
+	// spawn し、JoinHandle を select の式scopedで借りて、select 完了後に所有権を
+	// 取り戻すことで、タイムアウト時も permit をバックグラウンドタスクへ譲渡し、
+	// getaddrinfo の実完了まで保持させる。
+	let mut lookup_task = tokio::spawn(tokio::net::lookup_host(format!("{}:0", host)));
+	let outcome = tokio::select! {
+		res = &mut lookup_task => Some(res),
+		_ = tokio::time::sleep(DNS_LOOKUP_TIMEOUT) => None,
+	};
+	match outcome {
+		Some(Ok(Ok(resolved))) => {
 			let addrs: Vec<SocketAddr> = resolved.collect();
 			let mut cache = DNS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
 			if addrs.is_empty() {
@@ -144,7 +150,7 @@ pub(crate) async fn cached_lookup_host(host: &str) -> std::io::Result<Vec<Socket
 			}
 			Ok(addrs)
 		}
-		Ok(Err(e)) => {
+		Some(Ok(Err(e))) => {
 			let kind = e.kind();
 			let mut cache = DNS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
 			cache.put(
@@ -156,7 +162,27 @@ pub(crate) async fn cached_lookup_host(host: &str) -> std::io::Result<Vec<Socket
 			);
 			Err(e)
 		}
-		Err(_elapsed) => {
+		Some(Err(_join_err)) => {
+			// spawn_blocking 内の panic 等。DNS 失敗として扱う。
+			let e = std::io::Error::new(std::io::ErrorKind::Other, "dns lookup task failed");
+			let mut cache = DNS_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+			cache.put(
+				key,
+				DnsEntry::Negative {
+					kind: e.kind(),
+					expires: Instant::now() + DNS_CACHE_NEGATIVE_TTL,
+				},
+			);
+			Err(e)
+		}
+		None => {
+			// このリクエストはもう待たないが、getaddrinfo スレッドは生きている。
+			// permit をバックグラウンドタスクへ譲渡し、実完了まで保持させる
+			// (DNS_LOOKUP_SEMAPHORE は 'static なので permit も 'static)。
+			tokio::spawn(async move {
+				let _ = lookup_task.await;
+				drop(_dns_permit);
+			});
 			// Cache the timeout as a negative entry so repeat requests to the
 			// same host do not each wait again -- but only briefly: a timeout
 			// means "slow this time", not "does not exist", so it gets a
@@ -176,9 +202,16 @@ pub(crate) async fn cached_lookup_host(host: &str) -> std::io::Result<Vec<Socket
 }
 
 /// Lowercase + strip a trailing FQDN dot so `example.com.` matches a
-/// `blocked_hosts` entry of `example.com`.
+/// `blocked_hosts` entry of `example.com`. Also strips IPv6 brackets, because
+/// `Url::host_str()` returns IPv6 literals as `[::1]` while operators write
+/// `blocked_hosts` entries without them (L-08).
 pub(crate) fn normalize_host(host: &str) -> String {
-	host.trim_end_matches('.').to_lowercase()
+	let host = host.trim_end_matches('.');
+	let host = host
+		.strip_prefix('[')
+		.and_then(|s| s.strip_suffix(']'))
+		.unwrap_or(host);
+	host.to_lowercase()
 }
 
 /// Suffix match so blocking `example.com` also covers `evil.example.com`.
@@ -295,6 +328,17 @@ fn v6_to_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
 	}
 	// IPv4-translated ::ffff:0:0:0/96
 	if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0xffff && seg[5] == 0 {
+		return Some(std::net::Ipv4Addr::new(
+			(seg[6] >> 8) as u8,
+			(seg[6] & 0xff) as u8,
+			(seg[7] >> 8) as u8,
+			(seg[7] & 0xff) as u8,
+		));
+	}
+	// ISATAP (RFC 5214): インターフェース ID が 0000:5EFE:v4addr。ホスト側で
+	// ISATAP がルーティングされている環境でのみ実害があるが (L-09)、検出自体は
+	// 環境非依存で安全に行える。
+	if seg[4] == 0 && seg[5] == 0x5efe {
 		return Some(std::net::Ipv4Addr::new(
 			(seg[6] >> 8) as u8,
 			(seg[6] & 0xff) as u8,
@@ -559,6 +603,10 @@ mod tests {
 			"2002:a9fe:a9fe::",
 			"2001::1",
 			"::ffff:0:7f00:1",
+			// ISATAP (RFC 5214) インターフェース ID 0000:5EFE:v4addr も埋め込み
+			// IPv4 に展開してポリシーを適用する (L-09)。
+			"2001:db8::5efe:7f00:1",
+			"2001:db8::5efe:a9fe:a9fe",
 		] {
 			assert!(is_ip_blocked(&c, v6(ip)), "{} should be blocked", ip);
 		}
@@ -566,6 +614,11 @@ mod tests {
 		assert!(
 			!is_ip_blocked(&c, v6("2002:808:808::")),
 			"6to4 of 8.8.8.8 should pass"
+		);
+		// ISATAP wrapping a public IPv4 must not be over-blocked.
+		assert!(
+			!is_ip_blocked(&c, v6("2001:db8::5efe:808:808")),
+			"ISATAP of 8.8.8.8 should pass"
 		);
 	}
 
@@ -612,6 +665,19 @@ mod tests {
 		let dot = Some(vec![".example.com".to_owned()]);
 		assert!(is_host_blocked(dot.as_ref(), "evil.example.com"));
 		assert!(!is_host_blocked(dot.as_ref(), "example.com"));
+	}
+
+	#[test]
+	fn normalize_host_strips_ipv6_brackets() {
+		// Url::host_str() は IPv6 リテラルを `[::1]` の形で返すが、運用者は
+		// blocked_hosts をブラケット無しで書く (L-08)。比較前に剥がして一致させる。
+		assert_eq!(normalize_host("[::1]"), "::1");
+		assert_eq!(normalize_host("[2001:db8::1]"), "2001:db8::1");
+		// 末尾ドット除去と併用できる。
+		assert_eq!(normalize_host("EXAMPLE.COM."), "example.com");
+		let blocked = Some(vec!["2606:4700:4700::1111".to_owned()]);
+		assert!(is_host_blocked(blocked.as_ref(), "[2606:4700:4700::1111]"));
+		assert!(!is_host_blocked(blocked.as_ref(), "[2606:1111::1]"));
 	}
 
 	#[test]

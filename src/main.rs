@@ -208,6 +208,16 @@ fn main() {
 	let client = client.dns_resolver(std::sync::Arc::new(crate::ssrf::ValidatingResolver::new(
 		config.clone(),
 	)));
+	// P-02: リクエスト単位の `.timeout()` は「接続開始からボディ完了まで」の合計期限
+	// (reqwest の TotalTimeoutBody) で、中継パス (browsersafe な音声/動画) の
+	// ダウンロードにも同じ期限がかかり、大きなファイルが転送途中で打ち切られて
+	// しまう。接続確立とアイドル (無応答) だけを見る connect_timeout/read_timeout に
+	// 切り替える: 画像パスは別途 max_size (バイト数) と spawn_blocking 側のデコード
+	// タイムアウトで保護されている。
+	let timeout_dur = std::time::Duration::from_millis(config.timeout);
+	let client = client
+		.connect_timeout(timeout_dur)
+		.read_timeout(timeout_dur);
 	let client = client.build().unwrap();
 	let mut fontdb = resvg::usvg::fontdb::Database::new();
 	if config.load_system_fonts {
@@ -222,7 +232,15 @@ fn main() {
 	let fontdb = Arc::new(fontdb);
 	let arg_tup = (client, config, dummy_png, fontdb);
 	rt.block_on(async {
-		let http_addr: SocketAddr = arg_tup.1.bind_addr.parse().unwrap();
+		// bind_addr のパース失敗は設定ミス。メッセージなしの panic を避け説明付きで
+		// 終了する (L-11)。
+		let http_addr: SocketAddr = match arg_tup.1.bind_addr.parse() {
+			Ok(addr) => addr,
+			Err(e) => {
+				eprintln!("invalid bind_addr {:?}: {}", arg_tup.1.bind_addr, e);
+				std::process::exit(1);
+			}
+		};
 		let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
 		let app = Router::new();
 		// Liveness probe that never touches the fetch path: the SSRF policy
@@ -258,26 +276,59 @@ fn main() {
 		.unwrap();
 	});
 }
-async fn check_url(config: &Arc<ConfigFile>, url: impl AsRef<str>) -> Result<(), String> {
-	let u = reqwest::Url::from_str(url.as_ref()).map_err(|e| format!("{:?}", e))?;
+/// 外部に返す `X-Proxy-Error` は固定トークンのみ (P-03: 到達性/内部アドレスの
+/// オラクル化を防ぐ)。詳細な原因 (DNS のエラー種別、解決済みホスト名など) は
+/// check_url 内で eprintln! しサーバ側ログにのみ残す。
+enum CheckUrlError {
+	InvalidUrl,
+	UnsupportedScheme,
+	PolicyDenied,
+	ResolveFailed,
+}
+impl CheckUrlError {
+	fn as_header(&self) -> &'static str {
+		match self {
+			CheckUrlError::InvalidUrl => "InvalidUrl",
+			CheckUrlError::UnsupportedScheme => "UnsupportedScheme",
+			CheckUrlError::PolicyDenied => "PolicyDenied",
+			CheckUrlError::ResolveFailed => "ResolveFailed",
+		}
+	}
+}
+async fn check_url(config: &Arc<ConfigFile>, url: impl AsRef<str>) -> Result<(), CheckUrlError> {
+	let u = reqwest::Url::from_str(url.as_ref()).map_err(|e| {
+		eprintln!("check_url: invalid url {:?}: {:?}", url.as_ref(), e);
+		CheckUrlError::InvalidUrl
+	})?;
 	match u.scheme().to_lowercase().as_str() {
 		"http" | "https" => {}
-		scheme => return Err(format!("scheme: {}", scheme)),
+		scheme => {
+			eprintln!(
+				"check_url: unsupported scheme {:?} for {:?}",
+				scheme,
+				url.as_ref()
+			);
+			return Err(CheckUrlError::UnsupportedScheme);
+		}
 	}
-	let host = u.host_str().ok_or_else(|| "no host".to_owned())?;
+	let host = u.host_str().ok_or(CheckUrlError::InvalidUrl)?;
 	// Fail fast with a clear error. The connect-time ValidatingResolver
 	// re-enforces the same policy on the addresses actually connected to,
 	// closing the DNS-rebinding TOCTOU (finding #2).
 	if crate::ssrf::is_host_blocked(config.blocked_hosts.as_ref(), host) {
-		return Err("Blocked address".to_owned());
+		return Err(CheckUrlError::PolicyDenied);
 	}
 	// Async resolution so a slow attacker-controlled nameserver cannot stall
 	// the async worker thread (finding #10). Shared LRU cache with the
 	// connect-time resolver keeps both DNS views consistent.
-	let ips = crate::ssrf::cached_lookup_host(host)
-		.await
-		.map_err(|e| format!("{:?} {}", e, host))?;
-	crate::ssrf::validate_resolved_ips(config, &ips)
+	let ips = crate::ssrf::cached_lookup_host(host).await.map_err(|e| {
+		eprintln!("check_url: dns resolve failed for {:?}: {:?}", host, e);
+		CheckUrlError::ResolveFailed
+	})?;
+	crate::ssrf::validate_resolved_ips(config, &ips).map_err(|e| {
+		eprintln!("check_url: policy denied for {:?}: {:?}", host, e);
+		CheckUrlError::PolicyDenied
+	})
 }
 async fn get_file(
 	_path: Option<axum::extract::Path<String>>,
@@ -306,14 +357,19 @@ async fn get_file(
 	if let Ok(url) = q.url.parse() {
 		headers.append("X-Remote-Url", url);
 	}
-	if config.encode_avif {
-		headers.append("Vary", "Accept,Range".parse().unwrap());
-	}
+	// Range は全リクエストの中継パスに影響し得るため avif 設定と切り離す (L-04)。
+	let vary = if config.encode_avif {
+		"Accept,Range"
+	} else {
+		"Range"
+	};
+	headers.append("Vary", vary.parse().unwrap());
 	let time = chrono::Utc::now();
-	if let Err(s) = check_url(&config, &q.url).await {
-		if let Ok(v) = s.parse() {
-			headers.append("X-Proxy-Error", v);
-		}
+	if let Err(e) = check_url(&config, &q.url).await {
+		headers.append(
+			"X-Proxy-Error",
+			reqwest::header::HeaderValue::from_static(e.as_header()),
+		);
 		if q.fallback.is_some() {
 			headers.append("Content-Type", "image/png".parse().unwrap());
 			return Err((axum::http::StatusCode::OK, headers, (*dummy_img).clone()).into_response());
@@ -360,7 +416,9 @@ async fn get_file(
 	let mut redirects: u8 = 0;
 	let resp = loop {
 		let req = client.get(&current_url);
-		let req = req.timeout(std::time::Duration::from_millis(config.timeout));
+		// P-02: per-request な合計タイムアウト (.timeout) は中継パスのボディ転送まで
+		// 打ち切ってしまうため使わない。connect_timeout/read_timeout (client 側) が
+		// 全リクエストに効く。
 		let req = req.header("User-Agent", config.user_agent.clone());
 		let req = if let Some(range) = client_headers.get("Range") {
 			req.header("Range", range.as_bytes())
@@ -370,18 +428,17 @@ async fn get_file(
 		let resp = match req.send().await {
 			Ok(resp) => resp,
 			Err(e) => {
+				// 接続失敗の詳細 (解決済みソケットアドレス、OS エラー種別など) は
+				// サーバ側ログにのみ残す。本文に載せると内部到達性のオラクルになる (P-03)。
+				eprintln!("fetch failed for {:?}: {:?}", current_url, e);
 				if q.fallback.is_some() {
 					headers.append("Content-Type", "image/png".parse().unwrap());
 					return Err(
 						(axum::http::StatusCode::OK, headers, (*dummy_img).clone()).into_response()
 					);
 				}
-				return Err((
-					axum::http::StatusCode::BAD_REQUEST,
-					headers,
-					format!("{:?}", e),
-				)
-					.into_response());
+				headers.append("X-Proxy-Error", "FetchFailed".parse().unwrap());
+				return Err((axum::http::StatusCode::BAD_REQUEST, headers).into_response());
 			}
 		};
 		if !resp.status().is_redirection() {
@@ -435,20 +492,61 @@ async fn get_file(
 		}
 		drop(stream);
 		let next_str = next.to_string();
-		if let Err(s) = check_url(&config, &next_str).await {
-			if let Ok(v) = s.parse() {
-				headers.append("X-Proxy-Error", v);
+		if let Err(e) = check_url(&config, &next_str).await {
+			headers.append(
+				"X-Proxy-Error",
+				reqwest::header::HeaderValue::from_static(e.as_header()),
+			);
+			// 初回 URL の検証失敗と同じく fallback を尊重する (L-03)。
+			if q.fallback.is_some() {
+				headers.append("Content-Type", "image/png".parse().unwrap());
+				return Err(
+					(axum::http::StatusCode::OK, headers, (*dummy_img).clone()).into_response()
+				);
 			}
 			return Err((axum::http::StatusCode::BAD_REQUEST, headers).into_response());
 		}
 		current_url = next_str;
 		redirects += 1;
 	};
+	// 画像パスは本文全体を前提にデコードするため、オリジンが Range を尊重して 206 を
+	// 返すとデコードに失敗する (L-01)。画像かつ 206 なら Range 無しで取り直す。
+	let resp = {
+		let ct_is_img = resp
+			.headers()
+			.get("Content-Type")
+			.map(|m| String::from_utf8_lossy(m.as_bytes()).starts_with("image/"))
+			.unwrap_or(false);
+		if ct_is_img && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+			match client
+				.get(&current_url)
+				.header("User-Agent", config.user_agent.clone())
+				.send()
+				.await
+			{
+				Ok(full) => full,
+				// 取り直しに失敗したら元の 206 のまま既存のエラー処理に委ねる。
+				Err(_) => resp,
+			}
+		} else {
+			resp
+		}
+	};
 	fn add_remote_header(
 		key: &'static str,
 		headers: &mut HeaderMap,
 		remote_headers: &reqwest::header::HeaderMap,
 	) {
+		// Content-Type は最初の値のみ採用する (L-02): 重複ヘッダで「ブラウザ判定に使う
+		// 値」と「実際に配信される値」をすり替える type confusion を防ぐ。
+		if key == "Content-Type" {
+			if let Some(v) = remote_headers.get(key) {
+				if let Ok(value) = reqwest::header::HeaderValue::from_bytes(v.as_bytes()) {
+					headers.append(key, value);
+				}
+			}
+			return;
+		}
 		for v in remote_headers.get_all(key) {
 			// Never unwrap on attacker-controlled bytes: from_bytes rejects
 			// CTLs/DEL and we must not panic (finding #3). Invalid values are
@@ -533,8 +631,10 @@ impl RequestContext {
 				let cd_utf8 = cd.params.get("filename*");
 				let mut name = None;
 				if let Some(cd_utf8) = cd_utf8 {
-					let cd_utf8 = cd_utf8.to_uppercase();
-					if cd_utf8.starts_with("UTF-8''") && cd_utf8.len() > 7 {
+					// プレフィックス判定のみ大文字小文字を無視し、値本体は原文のまま
+					// decode する (L-07: 返却ファイル名が大文字化される問題)。
+					if cd_utf8.len() > 7 && cd_utf8.as_bytes()[..7].eq_ignore_ascii_case(b"UTF-8''")
+					{
 						name = urlencoding::decode(&cd_utf8[7..])
 							.map(|s| s.to_string())
 							.ok();
@@ -582,7 +682,9 @@ impl RequestContext {
 		let mut content_type = None;
 		if let Some(media) = self.headers.get("Content-Type") {
 			let s = String::from_utf8_lossy(media.as_bytes());
-			if s.as_ref() == "image/svg+xml" {
+			// `image/svg+xml; charset=utf-8` 等パラメータ付きも許容する (L-05)。
+			let media_type = s.split(';').next().unwrap_or("").trim();
+			if media_type.eq_ignore_ascii_case("image/svg+xml") {
 				is_svg = true;
 			} else {
 				content_type = Some(s);
@@ -811,6 +913,8 @@ impl RequestContext {
 		self.headers.remove("Content-Length");
 		self.headers.remove("Content-Range");
 		self.headers.remove("Accept-Ranges");
+		// 上流の 4xx/5xx が共有キャッシュに 5 分キャッシュされるのを防ぐ (L-11)。
+		self.headers.remove("Cache-Control");
 		self.headers.append(
 			"X-Proxy-Error",
 			format!("status:{}", status.as_u16()).parse().unwrap(),
@@ -878,14 +982,16 @@ impl RequestContext {
 					response_bytes.extend_from_slice(&b);
 				}
 				Err(e) => {
-					self.headers
-						.append("X-Proxy-Error", format!("LoadAll:{:?}", e).parse().unwrap());
-					return Err((
-						axum::http::StatusCode::BAD_GATEWAY,
-						self.headers.clone(),
-						format!("{:?}", e),
-					)
-						.into_response());
+					// 本文に reqwest の Debug を載せると内部到達性のオラクルになる
+					// (P-03)。詳細は X-Proxy-Error とサーバ側ログにのみ残す。
+					eprintln!("load_all failed: {:?}", e);
+					self.headers.append(
+						"X-Proxy-Error",
+						img::error_header_value(format!("LoadAll:{:?}", e)),
+					);
+					return Err(
+						(axum::http::StatusCode::BAD_GATEWAY, self.headers.clone()).into_response()
+					);
 				}
 			}
 		}
