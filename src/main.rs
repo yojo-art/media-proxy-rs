@@ -12,6 +12,8 @@ use axum::{http::HeaderMap, response::IntoResponse, Router};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
+#[cfg(feature = "avif-decoder")]
+mod avif_seq;
 mod browsersafe;
 mod image_test;
 mod img;
@@ -896,6 +898,14 @@ impl RequestContext {
 						self.headers.remove("Content-Type");
 						self.headers
 							.append("Content-Type", "image/x-mng".parse().unwrap());
+					}
+					// guess_format非対応のavisブランド
+					#[cfg(feature = "avif-decoder")]
+					if crate::avif_seq::is_avif_sequence(head) {
+						is_img = true;
+						self.headers.remove("Content-Type");
+						self.headers
+							.append("Content-Type", "image/avif".parse().unwrap());
 					}
 				}
 			}
