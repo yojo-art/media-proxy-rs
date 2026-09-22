@@ -15,17 +15,22 @@ enum Target {
 	Unix(PathBuf),
 }
 
-/// Probe target for a TCP bind address: the host is always loopback.
+/// Probe target for a TCP bind address.
 ///
-/// A `bind_addr` is necessarily local -- the server cannot bind anything else --
-/// so the host part tells the probe nothing, and taking it from the config would
-/// let a config value turn this healthcheck into an outbound request to an
-/// arbitrary host. Only the port is used, and the path is fixed to `/healthz`:
-/// the liveness route that never goes through the SSRF-checked fetch path.
+/// A wildcard bind (`0.0.0.0` / `::`) is not itself connectable, so it is
+/// probed via loopback instead. Any other address is already a concrete,
+/// already-validated `SocketAddr` (never a hostname -- `parse_target` only
+/// reaches this via `SocketAddr::parse` or `parse_bind_addr`'s `http://IP:port`
+/// form, both of which require an IP literal), so it is probed as-is: an
+/// operator who deliberately binds a specific non-loopback interface still
+/// gets a working healthcheck. The path is fixed to `/healthz`: the liveness
+/// route that never goes through the SSRF-checked fetch path.
 fn tcp_target(addr: &std::net::SocketAddr) -> Target {
 	let host = match addr.ip() {
-		std::net::IpAddr::V4(_) => "127.0.0.1",
-		std::net::IpAddr::V6(_) => "[::1]",
+		std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
+		std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_owned(),
+		std::net::IpAddr::V4(ip) => ip.to_string(),
+		std::net::IpAddr::V6(ip) => format!("[{}]", ip),
 	};
 	Target::Tcp(format!("http://{}:{}/healthz", host, addr.port()))
 }
@@ -165,12 +170,11 @@ mod tests {
 	}
 
 	#[test]
-	fn tcp_targets_probe_loopback_healthz() {
-		// The host from bind_addr is never dialled, only its port is used.
+	fn wildcard_binds_probe_loopback_healthz() {
+		// A wildcard bind is not itself connectable, so loopback is substituted.
 		for addr in [
 			"0.0.0.0:12766",
 			"127.0.0.1:12766",
-			"192.0.2.5:12766",
 			"http://0.0.0.0:12766",
 			"http://127.0.0.1:12766",
 			"http://127.0.0.1:12766/healthz", // 旧CLI引数形式のURL
@@ -190,6 +194,19 @@ mod tests {
 				"{}",
 				addr
 			);
+		}
+	}
+
+	#[test]
+	fn specific_binds_are_probed_as_is() {
+		// A concrete, non-wildcard address is not itself reachable via
+		// loopback, so it must be probed on the address it was bound to.
+		for (addr, expected) in [
+			("192.0.2.5:12766", "http://192.0.2.5:12766/healthz"),
+			("http://192.0.2.5:12766", "http://192.0.2.5:12766/healthz"),
+			("[2001:db8::1]:12766", "http://[2001:db8::1]:12766/healthz"),
+		] {
+			assert_eq!(tcp_url(addr).as_deref(), Some(expected), "{}", addr);
 		}
 	}
 
