@@ -329,7 +329,9 @@ enum BindTarget {
 /// Canonical form is `unix:///path/to/sock` (or `unix:/path/to/sock`).
 /// For compatibility a bare absolute path such as `/var/run/.../proxy.sock`
 /// is also accepted as UDS, with a deprecation warning telling the operator
-/// to add the `unix://` prefix. Anything else must parse as `SocketAddr`.
+/// to add the `unix://` prefix. `http://IP:port` is accepted as an alias for
+/// `IP:port` (the healthcheck normalizes both to a loopback probe), and any
+/// other scheme is rejected instead of being mistaken for a socket path.
 fn parse_bind_addr(s: &str) -> Result<BindTarget, String> {
 	let s = s.trim();
 	if let Some(rest) = s.strip_prefix("unix://") {
@@ -344,11 +346,38 @@ fn parse_bind_addr(s: &str) -> Result<BindTarget, String> {
 		}
 		return Ok(BindTarget::Unix(PathBuf::from(rest)));
 	}
+	if let Some(rest) = s.strip_prefix("http://") {
+		// A listener has no path, so anything after the authority is ignored;
+		// an IP literal (not a hostname) is required so that startup never
+		// performs a name lookup.
+		return match authority(rest).parse::<SocketAddr>() {
+			Ok(addr) => Ok(BindTarget::Tcp(addr)),
+			Err(_) => Err(format!(
+				"invalid bind_addr {:?}: expected \"http://IP:port\"",
+				s
+			)),
+		};
+	}
+	if s.starts_with("https://") {
+		return Err(format!(
+			"invalid bind_addr {:?}: TLS is not supported; use \"http://IP:port\" (or \"IP:port\") and terminate TLS in a reverse proxy",
+			s
+		));
+	}
 	if let Ok(addr) = s.parse::<SocketAddr>() {
 		return Ok(BindTarget::Tcp(addr));
 	}
 	// Compatibility fallback so the earlier bare-path form keeps working.
 	if s.contains('/') || s.ends_with(".sock") {
+		if let Some((scheme, _)) = s.split_once("://") {
+			// Not a path: silently binding a socket file named after an
+			// unsupported scheme would leave the process listening somewhere
+			// the operator never asked for.
+			return Err(format!(
+				"invalid bind_addr {:?}: unsupported scheme {:?}; expected \"IP:port\", \"http://IP:port\" or \"unix:///path/to.sock\"",
+				s, scheme
+			));
+		}
 		eprintln!(
 			"WARNING: bind_addr {:?} has no scheme; treating it as a unix socket. Use \"unix://{}\" instead.",
 			s, s
@@ -356,9 +385,17 @@ fn parse_bind_addr(s: &str) -> Result<BindTarget, String> {
 		return Ok(BindTarget::Unix(PathBuf::from(s)));
 	}
 	Err(format!(
-		"invalid bind_addr {:?}: expected \"IP:port\" or \"unix:///path/to.sock\"",
+		"invalid bind_addr {:?}: expected \"IP:port\", \"http://IP:port\" or \"unix:///path/to.sock\"",
 		s
 	))
+}
+
+/// Authority part of a URL: drops any path, query or fragment.
+fn authority(s: &str) -> &str {
+	match s.find(['/', '?', '#']) {
+		Some(i) => &s[..i],
+		None => s,
+	}
 }
 
 /// Parses `unix_socket_permissions` (e.g. `"0666"`, `"660"`, `"0o600"`) as
@@ -1208,4 +1245,63 @@ impl futures::stream::Stream for PreDataStream {
 fn error_header_value(msg: String, fallback: &'static str) -> reqwest::header::HeaderValue {
 	reqwest::header::HeaderValue::from_bytes(msg.as_bytes())
 		.unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(fallback))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn tcp_addr(s: &str) -> SocketAddr {
+		match parse_bind_addr(s) {
+			Ok(BindTarget::Tcp(addr)) => addr,
+			_ => panic!("{} should be a TCP address", s),
+		}
+	}
+
+	#[test]
+	fn bind_addr_accepts_ip_port_and_http_url() {
+		assert_eq!(tcp_addr("0.0.0.0:12766").port(), 12766);
+		assert_eq!(tcp_addr(" 127.0.0.1:3000 ").port(), 3000);
+		assert_eq!(tcp_addr("[::1]:12766").port(), 12766);
+		// http://形式はhealthcheckと同じ解釈(パス以降は無視)
+		assert_eq!(tcp_addr("http://0.0.0.0:12766").port(), 12766);
+		assert_eq!(
+			tcp_addr("http://127.0.0.1:3001").to_string(),
+			"127.0.0.1:3001"
+		);
+		assert_eq!(tcp_addr("http://127.0.0.1:3001/healthz").port(), 3001);
+	}
+
+	#[test]
+	fn bind_addr_accepts_unix_paths() {
+		for s in [
+			"unix:///run/media-proxy/proxy.sock",
+			"unix:/run/media-proxy/proxy.sock",
+			"/run/media-proxy/proxy.sock",
+		] {
+			match parse_bind_addr(s) {
+				Ok(BindTarget::Unix(path)) => {
+					assert_eq!(path, Path::new("/run/media-proxy/proxy.sock"), "{}", s)
+				}
+				_ => panic!("{} should be a unix socket", s),
+			}
+		}
+	}
+
+	#[test]
+	fn bind_addr_rejects_typos_instead_of_binding_a_socket_file() {
+		// 未対応スキームや不正値は、その名前のソケットを黙って作らず起動時に落ちる
+		for s in [
+			"",
+			"12766",
+			"localhost:12766",
+			"http://127.0.0.1",
+			"http://localhost:12766",
+			"https://127.0.0.1:12766",
+			"tcp://127.0.0.1:12766",
+			"unix://",
+		] {
+			assert!(parse_bind_addr(s).is_err(), "{} should be rejected", s);
+		}
+	}
 }

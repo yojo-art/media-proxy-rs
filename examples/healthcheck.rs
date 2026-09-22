@@ -15,8 +15,34 @@ enum Target {
 	Unix(PathBuf),
 }
 
+/// Probe target for a TCP bind address: the host is always loopback.
+///
+/// A `bind_addr` is necessarily local -- the server cannot bind anything else --
+/// so the host part tells the probe nothing, and taking it from the config would
+/// let a config value turn this healthcheck into an outbound request to an
+/// arbitrary host. Only the port is used, and the path is fixed to `/healthz`:
+/// the liveness route that never goes through the SSRF-checked fetch path.
+fn tcp_target(addr: &std::net::SocketAddr) -> Target {
+	let host = match addr.ip() {
+		std::net::IpAddr::V4(_) => "127.0.0.1",
+		std::net::IpAddr::V6(_) => "[::1]",
+	};
+	Target::Tcp(format!("http://{}:{}/healthz", host, addr.port()))
+}
+
+/// Authority part of a URL: drops any path, query or fragment.
+fn authority(s: &str) -> &str {
+	match s.find(['/', '?', '#']) {
+		Some(i) => &s[..i],
+		None => s,
+	}
+}
+
 /// Mirrors main.rs's `parse_bind_addr` (kept separate: this is a standalone
 /// example binary, not linked against the main crate's private functions).
+/// `http://IP:port` is accepted like `IP:port`, and every value main.rs would
+/// refuse is refused here too, so the two cannot disagree about which address
+/// the server is listening on.
 fn parse_target(s: &str) -> Option<Target> {
 	let s = s.trim();
 	if let Some(rest) = s.strip_prefix("unix://") {
@@ -25,22 +51,19 @@ fn parse_target(s: &str) -> Option<Target> {
 	if let Some(rest) = s.strip_prefix("unix:") {
 		return (!rest.is_empty()).then(|| Target::Unix(PathBuf::from(rest)));
 	}
-	if s.starts_with("http://") || s.starts_with("https://") {
-		return Some(Target::Tcp(s.to_owned()));
+	if let Some(rest) = s.strip_prefix("http://") {
+		return authority(rest)
+			.parse::<std::net::SocketAddr>()
+			.ok()
+			.map(|addr| tcp_target(&addr));
+	}
+	if s.contains("://") {
+		// https:// (TLS is not supported) and unknown schemes: main.rs refuses
+		// to start on these, so there is no listener to probe.
+		return None;
 	}
 	if let Ok(addr) = s.parse::<std::net::SocketAddr>() {
-		// A wildcard bind address is not itself connectable; probe loopback.
-		let host = match addr.ip() {
-			std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_owned(),
-			std::net::IpAddr::V6(ip) if ip.is_unspecified() => "::1".to_owned(),
-			std::net::IpAddr::V4(ip) => ip.to_string(),
-			std::net::IpAddr::V6(ip) => format!("[{}]", ip),
-		};
-		return Some(Target::Tcp(format!(
-			"http://{}:{}/healthz",
-			host,
-			addr.port()
-		)));
+		return Some(tcp_target(&addr));
 	}
 	if s.contains('/') || s.ends_with(".sock") {
 		return Some(Target::Unix(PathBuf::from(s)));
@@ -48,8 +71,9 @@ fn parse_target(s: &str) -> Option<Target> {
 	None
 }
 
-/// Resolves the healthcheck target: an explicit CLI override (`args[1]`), or
-/// derived from the same config.json / MEDIA_PROXY_CONFIG_PATH main.rs uses.
+/// Resolves the healthcheck target: an explicit CLI override (`args[1]`, parsed
+/// exactly like `bind_addr`), or derived from the same config.json /
+/// MEDIA_PROXY_CONFIG_PATH main.rs uses.
 fn resolve_target(override_target: &Option<String>) -> Option<Target> {
 	if let Some(s) = override_target {
 		return parse_target(s);
@@ -127,4 +151,83 @@ fn main() {
 	}
 	println!("healthcheck failed");
 	std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn tcp_url(s: &str) -> Option<String> {
+		match parse_target(s) {
+			Some(Target::Tcp(url)) => Some(url),
+			_ => None,
+		}
+	}
+
+	#[test]
+	fn tcp_targets_probe_loopback_healthz() {
+		// The host from bind_addr is never dialled, only its port is used.
+		for addr in [
+			"0.0.0.0:12766",
+			"127.0.0.1:12766",
+			"192.0.2.5:12766",
+			"http://0.0.0.0:12766",
+			"http://127.0.0.1:12766",
+			"http://127.0.0.1:12766/healthz", // 旧CLI引数形式のURL
+		] {
+			assert_eq!(
+				tcp_url(addr).as_deref(),
+				Some("http://127.0.0.1:12766/healthz"),
+				"{}",
+				addr
+			);
+		}
+		// IPv6 binds keep the same-family loopback.
+		for addr in ["[::]:12766", "[::1]:12766", "http://[::1]:12766"] {
+			assert_eq!(
+				tcp_url(addr).as_deref(),
+				Some("http://[::1]:12766/healthz"),
+				"{}",
+				addr
+			);
+		}
+	}
+
+	#[test]
+	fn unix_targets_keep_the_socket_path() {
+		for addr in [
+			"unix:///run/media-proxy/proxy.sock",
+			"unix:/run/media-proxy/proxy.sock",
+			"/run/media-proxy/proxy.sock",
+		] {
+			match parse_target(addr) {
+				Some(Target::Unix(path)) => {
+					assert_eq!(
+						path,
+						PathBuf::from("/run/media-proxy/proxy.sock"),
+						"{}",
+						addr
+					)
+				}
+				_ => panic!("{} should be a unix target", addr),
+			}
+		}
+	}
+
+	#[test]
+	fn unsupported_values_are_rejected() {
+		// main.rs refuses to start on these, so there is nothing to probe.
+		for addr in [
+			"",
+			"12766",
+			"localhost:12766",
+			"http://localhost:12766",
+			"http://127.0.0.1",
+			"https://127.0.0.1:12766",
+			"tcp://127.0.0.1:12766",
+			"unix://",
+		] {
+			assert!(parse_target(addr).is_none(), "{} should be rejected", addr);
+		}
+	}
 }
