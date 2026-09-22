@@ -274,6 +274,44 @@ jobs:
           magick asset/dummy.png ${{ runner.temp }}/http/tga.tga
           magick asset/dummy.png ${{ runner.temp }}/http/icon.ico
           magick asset/dummy.png ${{ runner.temp }}/http/open-exr.exr
+          magick asset/dummy.png ${{ runner.temp }}/http/mng.mng
+          # JNG(JPEGメンバー)を埋め込んだMNGはImageMagickで生成できないためPythonで合成する
+          magick asset/dummy.png -flatten ${{ runner.temp }}/jng-member.jng
+          # 単体JNGファイル(.jng)もデコード対象
+          cp ${{ runner.temp }}/jng-member.jng ${{ runner.temp }}/http/jng.jng
+          python3 <<'PYEOF'
+          import os, struct, zlib
+          def chunk(t, b):
+              return struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b) & 0xFFFFFFFF)
+          tmp = os.environ["RUNNER_TEMP"]
+          jng = open(tmp + "/jng-member.jng", "rb").read()
+          w, h = struct.unpack(">II", jng[16:24])
+          sig = bytes([0x8A, 0x4D, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+          mhdr = chunk(b"MHDR", struct.pack(">III", w, h, 100) + bytes(16))
+          open(tmp + "/http/mng-jng.mng", "wb").write(sig + mhdr + jng[8:] + chunk(b"MEND", b""))
+          # アルファ付きJNG: IDATにPNGグレースケール(8bit)の勾配マスクを入れる
+          raw = b"".join(b"\x00" + bytes((x * 251) % 256 for x in range(w)) for _ in range(h))
+          idat = zlib.compress(raw)
+          out = sig + mhdr
+          off = 8
+          while off + 8 <= len(jng):
+              ln = struct.unpack(">I", jng[off:off + 4])[0]
+              t = jng[off + 4:off + 8]
+              body = jng[off + 8:off + 8 + ln]
+              if t == b"JHDR":
+                  body = bytearray(body)
+                  body[8] = 14   # color_type: カラー+アルファ
+                  body[12] = 8   # alpha_sample_depth
+                  body[13] = 0   # alpha_compression_method: IDAT(PNGグレースケール)
+                  body = bytes(body)
+              if t != b"IDAT":
+                  if t == b"IEND":
+                      out += chunk(b"IDAT", idat)
+                  out += chunk(t, body)
+              off += 12 + ln
+          out += chunk(b"MEND", b"")
+          open(tmp + "/http/mng-jng-alpha.mng", "wb").write(out)
+          PYEOF
       - name: Run App
         run: |
           docker network create --driver bridge servers

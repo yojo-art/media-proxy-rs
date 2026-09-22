@@ -893,7 +893,10 @@ impl RequestContext {
 						self.headers
 							.append("Content-Type", "image/jxr".parse().unwrap());
 					}
-					if head.starts_with(&crate::mng::SIGNATURE) {
+					// MNGと単体JNG(後者はdecode内でコンテナ包装)で処理
+					if head.starts_with(&crate::mng::SIGNATURE)
+						|| head.starts_with(&crate::mng::JNG_SIGNATURE)
+					{
 						is_img = true;
 						self.headers.remove("Content-Type");
 						self.headers
