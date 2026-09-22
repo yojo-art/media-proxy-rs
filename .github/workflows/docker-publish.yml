@@ -210,7 +210,11 @@ jobs:
           # release作成はcreate-releaseジョブ済み。ここではuploadのみ行う。
           # 同一リリースへの並行uploadによるGitHub APIの一時的404を避けるため、
           # 本ジョブは strategy.max-parallel: 1 で直列化している。
-          gh release upload nightly "/tmp/app/media-proxy-rs.gz#media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz" --repo "${{ github.repository }}" --clobber
+          # NOTE: `gh release upload` の `FILE#LABEL` 記法は表示ラベルのみを変更し、
+          # アセット名はローカルファイル名のままになる。全platformが同名に
+          # --clobberで上書きし合うのを避けるため、upload前にリネームする。
+          mv "/tmp/app/media-proxy-rs.gz" "/tmp/app/media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz"
+          gh release upload nightly "/tmp/app/media-proxy-rs_${{ env.PLATFORM_PAIR }}.gz" --repo "${{ github.repository }}" --clobber
 
   e2e-test:
     runs-on: ubuntu-latest
