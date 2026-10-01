@@ -24,9 +24,9 @@ updates:
       actions-minor-patch:
         update-types: ["minor", "patch"]
 
-  # ベースイメージ (rust:latest / alpine:latest) を digest 参照で追従。`latest` の
-  # ような可変タグはビルド再現性を損なうため、Dockerfile 側を `image@sha256:...` に
-  # 固定したうえで digest の更新をここで受け取る。
+  # ベースイメージ (rust / alpine) の更新を追従する。
+  # NOTE: 現状 Dockerfile は `latest` タグ参照で digest 固定していないため、dependabot は
+  # 更新PRを作らない。追従させる場合は `rust:latest@sha256:...` のように digest 固定する。
   - package-ecosystem: "docker"
     directories:
       - "/"
