@@ -235,6 +235,11 @@ impl Processor {
 		let default_family = cfg
 			.default_font_family
 			.clone()
+			.filter(|name| {
+				fontdb
+					.faces()
+					.any(|face| face.families.iter().any(|(n, _)| n == name))
+			})
 			.or_else(|| {
 				fontdb
 					.faces()
