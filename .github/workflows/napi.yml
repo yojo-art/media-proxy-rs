@@ -302,6 +302,13 @@ jobs:
       - name: Build dav1d/lcms2 static libs (same versions as Linux/macOS)
         shell: bash
         run: |
+          # Git Bash は起動時に /usr/bin (C:\Program Files\Git\usr\bin) を PATH 先頭に
+          # 足すため、中の GNU link.exe が MSVC の link.exe を隠してしまう。
+          # meson はこれを検出して "Found GNU link.exe instead of MSVC link.exe" で
+          # 落ちるため、MSVC の bin (cl と link が同居) を PATH 先頭に戻す。
+          MSVC_BIN="$(dirname "$(which cl)")"
+          export PATH="$MSVC_BIN:$PATH"
+          which -a link || true
           # Linux Docker / macOS と同じスクリプト・同じ版を使う。
           # 版は workflow の env (DAV1D_VERSION/LCMS2_VERSION) から取ること。
           # インストール先はジョブの PKG_CONFIG_PATH と同じ C:/napi-deps にする
