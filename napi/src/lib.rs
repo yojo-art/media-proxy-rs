@@ -163,10 +163,8 @@ impl MediaProcessor {
 	/// `code` が `"Overloaded"` の Error を投げる。
 	/// 処理自体が `timeoutMs` を超えた場合は `code` が `"Timeout"` の Error を投げる。
 	///
-	/// 入力の `src` はコピーせず blocking スレッドへ渡すため、処理が終わるまで
-	/// 書き換えてはならない。`Timeout` 等で Promise が先に reject された後も
-	/// 裏側の処理が `src` を読んでいる場合があり、その間に書き換えると
-	/// 未定義動作になる。`fs.readFile` の結果を使い捨てる使い方が安全。
+	/// 入力の `src` は blocking スレッドへ渡す前にコピーするため、呼び出し後に
+	/// 書き換えても処理には影響しない。
 	#[napi]
 	pub fn process<'env>(
 		&self,
