@@ -1,12 +1,5 @@
 version: 2
 
-# public.ecr.aws は匿名読み取り可能な公開レジストリ。認証なしで digest を追従するため
-# 名前付きレジストリとして宣言し、docker エコシステムから参照する (L-10)。
-registries:
-  ecr-public:
-    type: docker_registry
-    url: https://public.ecr.aws
-
 updates:
   # Rust 依存 (Cargo.toml / Cargo.lock)。既存の Cargo.lock 追跡と rev 固定と合わせ、
   # 依存の脆弱性/陳腐化を更新 PR で拾う。
@@ -39,8 +32,6 @@ updates:
       - "/"
     schedule:
       interval: "weekly"
-    registries:
-      - ecr-public
     groups:
       docker-minor-patch:
         update-types: ["minor", "patch"]

@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/rust:latest AS cross_build
+FROM --platform=$BUILDPLATFORM rust:latest AS cross_build
 ARG BUILDARCH
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -36,7 +36,7 @@ COPY asset ./asset
 COPY examples ./examples
 RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/app/target bash /app/crossfiles/build.sh
 
-FROM public.ecr.aws/docker/library/alpine:latest
+FROM alpine:latest
 ARG UID="852"
 ARG GID="852"
 RUN addgroup -g "${GID}" proxy && adduser -u "${UID}" -G proxy -D -h /media-proxy-rs -s /bin/sh proxy

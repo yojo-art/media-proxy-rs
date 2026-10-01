@@ -54,7 +54,7 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         with:
-          image: public.ecr.aws/vend/tonistiigi/binfmt:latest
+          image: tonistiigi/binfmt:latest
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Log into registry ${{ env.REGISTRY }}
@@ -186,7 +186,7 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         with:
-          image: public.ecr.aws/vend/tonistiigi/binfmt:latest
+          image: tonistiigi/binfmt:latest
       - name: Load image
         run: |
           docker load --input ${{ runner.temp }}/${{ env.PLATFORM_PAIR }}.tar
@@ -244,7 +244,7 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         with:
-          image: public.ecr.aws/vend/tonistiigi/binfmt:latest
+          image: tonistiigi/binfmt:latest
       - name: Download artifact
         uses: actions/download-artifact@v8
         with:
@@ -320,7 +320,7 @@ jobs:
         run: |
           docker network create --driver bridge servers
           docker run -d -p 12766:12766 --net=servers -e MEDIA_PROXY_ALLOWED_NETWORKS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 --platform ${{ matrix.platform }} ${{ github.repository }}:latest
-          docker run -d -p 8080:80 --net=servers --name nginx -v ${{ runner.temp }}/http:/usr/share/nginx/html public.ecr.aws/nginx/nginx:stable-alpine
+          docker run -d -p 8080:80 --net=servers --name nginx -v ${{ runner.temp }}/http:/usr/share/nginx/html nginx:stable-alpine
       - name: Curl Test
         run: |
           sleep 10
