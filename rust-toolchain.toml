@@ -3,3 +3,5 @@
 # .github/napi/Dockerfile の ARG RUST_VERSION とそろえること。
 channel = "1.97.1"
 profile = "minimal"
+# fmt.yml の `cargo fmt` もこの版を使うため rustfmt を入れておく。
+components = ["rustfmt"]
