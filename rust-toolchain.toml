@@ -1,0 +1,5 @@
+[toolchain]
+# napi の Linux (Docker) / macOS / Windows ビルドで使う Rust の版。
+# .github/napi/Dockerfile の ARG RUST_VERSION とそろえること。
+channel = "1.97.1"
+profile = "minimal"

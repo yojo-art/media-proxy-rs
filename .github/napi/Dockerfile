@@ -6,6 +6,8 @@
 ARG BASE=debian:buster-slim
 # 再現性のため Rust の版を固定する。上げる場合は napi/ の `npm ci` で入る
 # @napi-rs/cli (package-lock.json で固定) との組み合わせでビルド確認すること。
+# ルートの rust-toolchain.toml の channel、.github/workflows/napi.yml の
+# toolchain / build-args とそろえること (版は workflow の env が正本)。
 ARG RUST_VERSION=1.97.1
 ARG NODE_VERSION=22.9.0
 # https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt の
@@ -79,6 +81,12 @@ RUN curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/nod
     && node --version && npm --version
 
 WORKDIR /build
+
+# dav1d-sys の内蔵ビルドは 1.5.0 固定のため、build-deps.sh で事前ビルドした版を
+# pkg-config 経由で優先させる (見つからなければ内蔵ビルドにフォールバック)。
+# .cargo/config.toml の always を dav1d だけ auto で上書きする。
+# (この Dockerfile は napi 専用のためサーバービルドには影響しない)
+ENV SYSTEM_DEPS_DAV1D_BUILD_INTERNAL=auto
 
 # napi CLI は package-lock.json で固定した版を napi/ 内に用意し、`npx napi build` で使う。
 # `npm install -g @napi-rs/cli` はその時点の最新版が入るため、タグを付け直すと

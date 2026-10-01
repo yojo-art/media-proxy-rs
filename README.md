@@ -60,6 +60,21 @@ amd64ではデフォルトでx86-64-v3向けにビルドしますが、x86-64-v3
 2. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
 3. `cargo build --release`
 
+## Node.js バインディング (napi)
+
+`napi/` に Node.js から呼べる `media-proxy-napi` があります (npm 公開なし、Release の添付から取得)。
+
+対応プラットフォーム:
+
+- `linux-x64-gnu` (glibc 2.28 以上)
+- `linux-arm64-gnu` (glibc 2.28 以上)
+- `darwin-arm64` (macOS 11.0 以上)
+- `win32-x64-msvc` (Windows 10/11 64bit。VC++ 再頒布可能パッケージは不要)
+
+Windows 版は CRT を静的リンク (`/MT`) しているため、追加のランタイムは不要です。
+dav1d / lcms2 は全プラットフォームで同じ版をソースから静的ビルドしています
+(版は `.github/workflows/napi.yml` の `env` が正本)。
+
 ## 対応する画像形式
 - AVIF(dav1d)
 - BMP

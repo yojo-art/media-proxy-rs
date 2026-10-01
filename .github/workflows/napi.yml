@@ -9,6 +9,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # dav1d / lcms2 の版はここに1か所だけ書く (2-2)。
+  # Linux Docker には build-args で渡し、macOS / Windows は build-deps.sh の
+  # 環境変数として参照する。上げる際は3か所まとめて確認すること。
+  DAV1D_VERSION: 1.5.4
+  LCMS2_VERSION: lcms2.16
+  # 全プラットフォームで Rust 1.97.1 に固定 (rust-toolchain.toml と同じ値)。
+  RUST_VERSION: 1.97.1
 
 jobs:
   build:
@@ -46,6 +53,11 @@ jobs:
           context: .
           file: .github/napi/Dockerfile
           target: ${{ matrix.dockerfile_target }}
+          # 版は workflow の env から渡す (Dockerfile の ARG 既定値に頼らない)。
+          build-args: |
+            RUST_VERSION=${{ env.RUST_VERSION }}
+            DAV1D_VERSION=${{ env.DAV1D_VERSION }}
+            LCMS2_VERSION=${{ env.LCMS2_VERSION }}
           outputs: type=local,dest=./napi-out
           cache-from: type=gha,scope=napi-${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=napi-${{ matrix.target }}
@@ -132,6 +144,17 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+    env:
+      # 古い macOS でも読み込めるよう最低対応バージョンを明示する (2-3)。
+      # rustc の既定値は 11.0 だが、meson/clang で作る dav1d/lcms2 側にも
+      # 同じ値を効かせるためジョブ全体に付ける。
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      # build-deps.sh で作った静的ライブラリのみを見せる
+      # (Linux Docker と同じ構成。static のみなので静的リンクになる)。
+      PKG_CONFIG_PATH: /tmp/napi-deps/dav1d/lib/pkgconfig:/tmp/napi-deps/lcms2/lib/pkgconfig
+      # dav1d-sys の内蔵ビルドは 1.5.0 固定のため、事前ビルドの版を
+      # 優先させる (見つからなければ内蔵ビルドにフォールバック)。
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: auto
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -152,12 +175,20 @@ jobs:
       - name: Build dav1d/lcms2 static libs (GitHub mirror)
         run: |
           # Linux Docker (.github/napi/Dockerfile) と同じ物を使う。
-          # バージョンは Dockerfile の ARG (DAV1D_VERSION/LCMS2_VERSION) と合わせること。
+          # 版は workflow の env (DAV1D_VERSION/LCMS2_VERSION) から取ること。
+          # Dockerfile の ARG と合わせるのを忘れないこと。
           # インストール先は build-deps.sh の既定 (/tmp/napi-deps 配下。SIP 対応)。
-          DAV1D_VERSION=1.5.4 LCMS2_VERSION=lcms2.16 bash .github/napi/build-deps.sh
+          DAV1D_VERSION=${{ env.DAV1D_VERSION }} LCMS2_VERSION=${{ env.LCMS2_VERSION }} bash .github/napi/build-deps.sh
+
+      - name: Verify dav1d/lcms2 versions
+        run: |
+          pkg-config --modversion dav1d
+          pkg-config --modversion lcms2
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -177,15 +208,12 @@ jobs:
 
       - name: Build napi binary (native)
         working-directory: napi
-        env:
-          # build-deps.sh で作った静的ライブラリのみを見せる
-          # (Linux Docker と同じ構成。static のみなので静的リンクになる)。
-          PKG_CONFIG_PATH: /tmp/napi-deps/dav1d/lib/pkgconfig:/tmp/napi-deps/lcms2/lib/pkgconfig
         run: |
           # リポジトリルートでの `npx napi` はローカル CLI を見つけられず
           # レジストリの別名パッケージ `napi` を取得しようとして失敗するため、
           # npm ci 済みのローカル @napi-rs/cli を npm run 経由で使う。
           # ネイティブビルドなので --target 不要 (darwin-arm64 になる)。
+          # PKG_CONFIG_PATH / SYSTEM_DEPS_* はジョブの env から継承する。
           npm run build
 
       - name: Rename artifact
@@ -196,6 +224,8 @@ jobs:
       - name: Inspect linked libs (informational)
         run: |
           otool -L ./artifacts/media-proxy-napi.darwin-arm64.node || true
+          # 最低対応バージョン (minos) が MACOSX_DEPLOYMENT_TARGET 通りか見る。
+          otool -l ./artifacts/media-proxy-napi.darwin-arm64.node | grep -A3 LC_BUILD_VERSION || true
 
       - name: Smoke test (native)
         run: |
@@ -236,7 +266,8 @@ jobs:
     # mingw (x86_64-pc-windows-gnu) での Linux クロスは jpegxr (SAL マクロ +
     # バックスラッシュ include) が原因で不可であり、作れても MSYS2 版 Node 専用で
     # 公式 Node.js では動かないため、公式 Node.js 向けの msvc をネイティブで作る。
-    runs-on: windows-latest
+    # windows-2022 に固定する (latest 追従で MSVC/Windows SDK が変わるのを避ける)。
+    runs-on: windows-2022
     permissions:
       contents: read
       id-token: write
@@ -246,6 +277,12 @@ jobs:
       # Strawberry 同梱の mingw-gcc を掴み、MSVC リンクと不整合を起こす。
       CC: cl
       CXX: cl
+      # build-deps.sh で作った静的ライブラリを pkg-config 経由で使わせる
+      # (Linux/macOS と同じ版。区切り文字は Windows の `;`)。
+      PKG_CONFIG_PATH: ${{ runner.temp }}/napi-deps/dav1d/lib/pkgconfig;${{ runner.temp }}/napi-deps/lcms2/lib/pkgconfig
+      # dav1d-sys の内蔵ビルドは 1.5.0 固定のため、事前ビルドの 1.5.4 を
+      # 優先させる (見つからなければ内蔵ビルドにフォールバック)。
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: auto
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -255,13 +292,37 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          # pkgconfiglite: dav1d-sys の内部ビルド後に pkg-config 呼び出しが
-          # 必須。Strawberry 同梱の pkg-config.bat は broken 扱いのため別途用意。
+          # pkgconfiglite: build-deps.sh で作った dav1d/lcms2 を
+          # pkg-config 経由で探すために必要。Strawberry 同梱の
+          # pkg-config.bat は broken 扱いのため別途用意。
           choco install -y nasm ninja llvm pkgconfiglite
           pip install meson
 
+      - name: Build dav1d/lcms2 static libs (same versions as Linux/macOS)
+        shell: bash
+        run: |
+          # Linux Docker / macOS と同じスクリプト・同じ版を使う。
+          # 版は workflow の env (DAV1D_VERSION/LCMS2_VERSION) から取ること。
+          # Git Bash の /tmp と素の meson (Windows ネイティブ) でパス形式が
+          # 異なるため、インストール先は RUNNER_TEMP を Windows 形式に直して渡す。
+          # Rust 側は .cargo/config.toml で /MT (静的 CRT) のため、
+          # meson 側も -Db_vscrt=mt で合わせる (食い違うとリンクで壊れる)。
+          DEPS_PREFIX="$(cygpath -m "${RUNNER_TEMP}/napi-deps")" \
+          DAV1D_VERSION="${{ env.DAV1D_VERSION }}" \
+          LCMS2_VERSION="${{ env.LCMS2_VERSION }}" \
+          MESON_VSCRT=mt \
+          bash .github/napi/build-deps.sh
+
+      - name: Verify dav1d/lcms2 versions
+        shell: bash
+        run: |
+          pkg-config --modversion dav1d
+          pkg-config --modversion lcms2
+
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -273,7 +334,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: napi-x86_64-pc-windows-msvc-v2
+          # CRT を /MT (静的) に変えたため v2 とは別キーにする。
+          shared-key: napi-x86_64-pc-windows-msvc-v3
 
       - name: Install npm dependencies
         working-directory: napi

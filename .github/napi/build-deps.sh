@@ -34,6 +34,15 @@ if [[ -n "$CROSS_FILE" ]]; then
   MESON_OPTS="--cross-file $CROSS_FILE"
 fi
 
+# Windows (MSVC) で Rust 側を /MT (静的 CRT) にする場合、meson 側も
+# -Db_vscrt=mt で合わせる。指定しないと既定の from_buildtype (/MD 相当) になり、
+# Rust と CRT のリンク方法が食い違う。Linux/macOS では未使用。
+# 例: MESON_VSCRT=mt bash build-deps.sh
+MESON_VSCRT="${MESON_VSCRT:-}"
+if [[ -n "$MESON_VSCRT" ]]; then
+  MESON_OPTS="$MESON_OPTS -Db_vscrt=$MESON_VSCRT"
+fi
+
 # dav1d (static)
 git clone --branch "$DAV1D_VERSION" --depth 1 https://github.com/videolan/dav1d.git /tmp/dav1d_src
 cd /tmp/dav1d_src
