@@ -192,7 +192,7 @@ fn main() {
 
 	let processor_cfg = media_proxy_rs::ProcessorConfig {
 		max_pixels: config.max_pixels,
-		max_decode_pixels: config.max_size / 4,
+		max_decode_pixels: (config.max_size / 4).max(1),
 		filter_type: config.filter_type,
 		webp_quality: config.webp_quality,
 		encode_avif: config.encode_avif,
