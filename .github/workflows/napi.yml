@@ -9,7 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # dav1d / lcms2 の版はここに1か所だけ書く (2-2)。
+  # dav1d / lcms2 の版はここに1か所だけ書く。
   # Linux Docker には build-args で渡し、macOS / Windows は build-deps.sh の
   # 環境変数として参照する。上げる際は3か所まとめて確認すること。
   DAV1D_VERSION: 1.5.4
