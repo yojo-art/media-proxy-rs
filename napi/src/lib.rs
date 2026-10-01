@@ -206,7 +206,7 @@ impl MediaProcessor {
 /// 待ち行列の上限・permit・spawn_blocking・タイムアウトの処理。
 async fn run(
 	inner: Arc<Inner>,
-	src: Buffer,
+	src: Vec<u8>,
 	lib_opts: LibProcessOptions,
 ) -> std::result::Result<Encoded, ProcessFailure> {
 	// すぐに permit が取れたら待ち行列に入れない。
