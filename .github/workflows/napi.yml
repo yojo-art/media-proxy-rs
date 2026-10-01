@@ -279,7 +279,8 @@ jobs:
       CXX: cl
       # build-deps.sh で作った静的ライブラリを pkg-config 経由で使わせる
       # (Linux/macOS と同じ版。区切り文字は Windows の `;`)。
-      PKG_CONFIG_PATH: ${{ runner.temp }}/napi-deps/dav1d/lib/pkgconfig;${{ runner.temp }}/napi-deps/lcms2/lib/pkgconfig
+      # ジョブの env では runner コンテキストが使えないため固定パスにする。
+      PKG_CONFIG_PATH: C:/napi-deps/dav1d/lib/pkgconfig;C:/napi-deps/lcms2/lib/pkgconfig
       # dav1d-sys の内蔵ビルドは 1.5.0 固定のため、事前ビルドの 1.5.4 を
       # 優先させる (見つからなければ内蔵ビルドにフォールバック)。
       SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: auto
@@ -303,11 +304,11 @@ jobs:
         run: |
           # Linux Docker / macOS と同じスクリプト・同じ版を使う。
           # 版は workflow の env (DAV1D_VERSION/LCMS2_VERSION) から取ること。
-          # Git Bash の /tmp と素の meson (Windows ネイティブ) でパス形式が
-          # 異なるため、インストール先は RUNNER_TEMP を Windows 形式に直して渡す。
+          # インストール先はジョブの PKG_CONFIG_PATH と同じ C:/napi-deps にする
+          # (Git Bash の /tmp は素の meson に渡せないため)。
           # Rust 側は .cargo/config.toml で /MT (静的 CRT) のため、
           # meson 側も -Db_vscrt=mt で合わせる (食い違うとリンクで壊れる)。
-          DEPS_PREFIX="$(cygpath -m "${RUNNER_TEMP}/napi-deps")" \
+          DEPS_PREFIX="C:/napi-deps" \
           DAV1D_VERSION="${{ env.DAV1D_VERSION }}" \
           LCMS2_VERSION="${{ env.LCMS2_VERSION }}" \
           MESON_VSCRT=mt \
