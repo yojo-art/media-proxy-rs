@@ -297,6 +297,15 @@ jobs:
           # pkg-config 経由で探すために必要。Strawberry 同梱の
           # pkg-config.bat は broken 扱いのため別途用意。
           choco install -y nasm ninja llvm pkgconfiglite
+          # choco の nasm は EXE 形式で C:\Program Files\NASM に入り、
+          # その場の PATH に載らないため GITHUB_PATH で後段に引き継ぐ。
+          # (meson が "Program 'nasm' not found" で落ちる対策)
+          $nasmDir = 'C:\Program Files\NASM'
+          if (Test-Path (Join-Path $nasmDir 'nasm.exe')) {
+            Add-Content -Path $env:GITHUB_PATH -Value $nasmDir
+            $env:Path = "$nasmDir;$env:Path"
+          }
+          nasm -v
           pip install meson
 
       - name: Build dav1d/lcms2 static libs (same versions as Linux/macOS)
