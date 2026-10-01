@@ -186,6 +186,9 @@ impl MediaProcessor {
 		};
 
 		let inner = self.inner.clone();
+		// JS の Buffer を blocking スレッドから直接読むと、reject 後に JS 側が書き換えたときに
+		// データ競合になる。デコードに比べればコピーのコストは小さいので、ここで Vec に移す。
+		let src = src.to_vec();
 
 		// Future の中では JS の値を作らない (Encoded / ProcessFailure はどちらも Send)。
 		// resolve / reject する JS の値は、callback (JS のスレッド) で作る。
