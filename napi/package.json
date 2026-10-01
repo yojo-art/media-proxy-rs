@@ -1,0 +1,22 @@
+{
+	"name": "media-proxy-napi",
+	"version": "0.1.0",
+	"private": true,
+	"napi": {
+		"binaryName": "media-proxy-napi",
+		"targets": [
+			"x86_64-unknown-linux-gnu",
+			"aarch64-unknown-linux-gnu",
+			"aarch64-apple-darwin",
+			"x86_64-pc-windows-msvc"
+		]
+	},
+	"scripts": {
+		"build": "napi build --platform --release",
+		"build:debug": "napi build --platform",
+		"test": "node --test test/*.mjs"
+	},
+	"devDependencies": {
+		"@napi-rs/cli": "^3.10.5"
+	}
+}

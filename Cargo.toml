@@ -63,7 +63,7 @@ lru = { version = "0.18", optional = true }
 tower-http = { version = "0.7", features = ["catch-panic"], optional = true }
 
 [workspace]
-members = ["."]
+members = [".", "napi"]
 
 [[bin]]
 name = "media-proxy-rs"

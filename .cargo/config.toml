@@ -1,4 +1,5 @@
 [env]
 SYSTEM_DEPS_BUILD_INTERNAL="always"
-[build]
+# Linux の ld 専用フラグ。MSVC (Windows) では無効なため target 限定にする。
+[target.'cfg(target_os = "linux")']
 rustflags=["-C", "link-args=-Wl,-lc"]
