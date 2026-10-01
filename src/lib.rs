@@ -93,6 +93,9 @@ pub struct Encoded {
 	pub bytes: Vec<u8>,
 	pub content_type: &'static str,
 	pub ext: &'static str,
+	/// 一部のフレームを落とすなど、結果が完全ではないときの理由。
+	/// Some のときは長期キャッシュさせないこと。
+	pub warning: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

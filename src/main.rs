@@ -721,10 +721,17 @@ async fn get_file(
 			headers.remove("Content-Type");
 			headers.append("Content-Type", encoded.content_type.parse().unwrap());
 			headers.remove("Cache-Control");
-			headers.append(
-				"Cache-Control",
-				"max-age=31536000, immutable".parse().unwrap(),
-			);
+			if let Some(warning) = &encoded.warning {
+				headers.append(
+					"X-Proxy-Error",
+					error_header_value(warning.clone(), "AnimEncode"),
+				);
+			} else {
+				headers.append(
+					"Cache-Control",
+					"max-age=31536000, immutable".parse().unwrap(),
+				);
+			}
 			headers.remove("Content-Length");
 			headers.remove("Content-Range");
 			headers.remove("Accept-Ranges");

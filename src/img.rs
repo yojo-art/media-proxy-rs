@@ -568,6 +568,7 @@ pub(crate) fn encode_anim(
 	let mut size: Option<(u32, u32)> = None;
 	let mut encoder = None;
 	let mut available_frames = 0;
+	let mut add_frame_err = None;
 	let mut timestamp = 0;
 	let mut frame_index: u64 = 0;
 	for frame in frames {
@@ -595,8 +596,9 @@ pub(crate) fn encode_anim(
 			}
 			if let Ok(aframe) = image_to_frame(&img, timestamp) {
 				if let Some(enc) = encoder.as_mut() {
-					if enc.add_frame(aframe).is_ok() {
-						available_frames += 1;
+					match enc.add_frame(aframe) {
+						Ok(_) => available_frames += 1,
+						Err(e) => add_frame_err = Some(format!("{:?}", e)),
 					}
 				}
 			}
@@ -621,6 +623,7 @@ pub(crate) fn encode_anim(
 		bytes: buf.to_vec(),
 		content_type: "image/webp",
 		ext: ".webp",
+		warning: add_frame_err,
 	})
 }
 
@@ -671,6 +674,7 @@ pub(crate) fn response_img(
 			bytes: buf,
 			content_type: "image/png",
 			ext: ".png",
+			warning: None,
 		});
 	}
 	let (width, height) = (img.width(), img.height());
@@ -686,6 +690,7 @@ pub(crate) fn response_img(
 			bytes: buf,
 			content_type: "image/avif",
 			ext: ".avif",
+			warning: None,
 		})
 	} else {
 		let encoder = webp::Encoder::from_rgba(rgba.as_raw(), width, height);
@@ -699,6 +704,7 @@ pub(crate) fn response_img(
 			bytes: mem.to_vec(),
 			content_type: "image/webp",
 			ext: ".webp",
+			warning: None,
 		})
 	}
 }
