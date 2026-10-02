@@ -26,6 +26,7 @@ jobs:
         id: fmt
         continue-on-error: true
         run: |
+          set +e
           cargo fmt --all -- --check
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
