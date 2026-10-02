@@ -129,6 +129,7 @@ RUN cp /build/napi/media-proxy-napi.linux-x64-gnu.node /
 
 FROM scratch AS out-x86_64
 COPY --from=build-x86_64 /media-proxy-napi.linux-x64-gnu.node /media-proxy-napi.linux-x64-gnu.node
+COPY --from=build-x86_64 /build/napi/index.js /index.js
 COPY --from=build-x86_64 /build/napi/index.d.ts /index.d.ts
 
 # -----------------------------------------------------------------------------
@@ -201,4 +202,5 @@ RUN cp /build/napi/media-proxy-napi.linux-arm64-gnu.node /
 
 FROM scratch AS out-aarch64
 COPY --from=build-aarch64 /media-proxy-napi.linux-arm64-gnu.node /media-proxy-napi.linux-arm64-gnu.node
+COPY --from=build-aarch64 /build/napi/index.js /index.js
 COPY --from=build-aarch64 /build/napi/index.d.ts /index.d.ts

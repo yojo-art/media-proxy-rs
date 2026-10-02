@@ -67,9 +67,11 @@ jobs:
           mkdir -p artifacts
           mv ./napi-out/media-proxy-napi.${{ matrix.platform }}.node ./artifacts/media-proxy-napi.${{ matrix.platform }}.node
 
-      - name: Stage index.d.ts for release
+      - name: Stage index.js/index.d.ts for release
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
+          # index.js は全プラットフォーム共通のローダー。x86_64 の物を代表で使う。
+          cp ./napi-out/index.js ./artifacts/index.js
           cp ./napi-out/index.d.ts ./artifacts/index.d.ts
 
       - name: Smoke test (x86_64)
@@ -121,12 +123,14 @@ jobs:
           path: artifacts/media-proxy-napi.${{ matrix.platform }}.node.gz
           if-no-files-found: error
 
-      - name: Upload index.d.ts artifact
+      - name: Upload JS binding artifact
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         uses: actions/upload-artifact@v7
         with:
-          name: media-proxy-napi-index-d-ts
-          path: artifacts/index.d.ts
+          name: media-proxy-napi-js
+          path: |
+            artifacts/index.js
+            artifacts/index.d.ts
           if-no-files-found: error
 
       - name: Attest build provenance
@@ -447,3 +451,89 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: release/*.gz
+
+  publish-npm:
+    name: publish npm (GitHub Packages)
+    runs-on: ubuntu-latest
+    needs: [build, build-darwin-arm64, build-windows-msvc]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check tag matches napi/package.json version
+        run: |
+          # バージョンは手動管理。タグと package.json の版が違うと
+          # 誤った版で公開するため、ここで止める。
+          tag=${GITHUB_REF#refs/tags/}
+          pkg=$(node -p "require('./napi/package.json').version")
+          if [ "$tag" != "v$pkg" ]; then
+            echo "tag $tag does not match napi/package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@yojo-art'
+          cache: 'npm'
+          cache-dependency-path: napi/package-lock.json
+
+      - name: Install npm dependencies
+        working-directory: napi
+        run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: downloaded
+          pattern: media-proxy-napi-*
+
+      - name: Prepare npm dirs
+        working-directory: napi
+        run: |
+          # .node.gz を戻して artifacts/ に置き、napi artifacts で npm/ に振り分ける。
+          # index.js / index.d.ts はビルド生成物をそのまま使う。
+          shopt -s nullglob
+          mkdir -p artifacts
+          for f in ../downloaded/media-proxy-napi-*/media-proxy-napi.*.node.gz; do
+            gzip -dc "$f" > "artifacts/$(basename "$f" .gz)"
+          done
+          ls artifacts
+          cp ../downloaded/media-proxy-napi-js/index.js ./index.js
+          cp ../downloaded/media-proxy-napi-js/index.d.ts ./index.d.ts
+          npx napi create-npm-dirs --npm-dir ./npm
+          npx napi artifacts --output-dir ./artifacts --npm-dir ./npm
+          # GH Release への添付と npm 公開は別ジョブ/別ステップで行う。
+          # pre-publish 既定では GH Release 作成と optional の公開まで行うため抑止する。
+          npx napi pre-publish --npm-dir ./npm -t npm --no-gh-release --skip-optional-publish
+          npx napi version --npm-dir ./npm
+
+      - name: Pack check (dry-run)
+        working-directory: napi
+        run: |
+          # 先頭に ./ が無いと npm が user/repo 形式と誤認するため付ける。
+          for dir in npm/*; do
+            npm publish --dry-run "./$dir"
+          done
+          npm publish --dry-run
+
+      - name: Publish optional platform packages
+        working-directory: napi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for dir in npm/*; do
+            npm publish "./$dir"
+          done
+
+      - name: Publish root package
+        working-directory: napi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish
