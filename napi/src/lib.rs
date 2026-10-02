@@ -105,12 +105,18 @@ impl MediaProcessor {
 			Some(q) if (0.0..=100.0).contains(&q) => q as f32,
 			Some(_) => return Err(invalid_arg("webpQuality must be in 0..=100")),
 		};
-		let concurrency = opts.concurrency.unwrap_or(4).max(1) as usize;
+		let concurrency = match opts.concurrency.unwrap_or(4) {
+			0 => return Err(invalid_arg("concurrency must be >= 1")),
+			v => v as usize,
+		};
 		let max_queue = opts
 			.max_queue
 			.map(|v| v as usize)
 			.unwrap_or(concurrency * 16);
-		let timeout = Duration::from_millis(u64::from(opts.timeout_ms.unwrap_or(10_000).max(1)));
+		let timeout = match opts.timeout_ms.unwrap_or(10_000) {
+			0 => return Err(invalid_arg("timeoutMs must be >= 1")),
+			v => Duration::from_millis(u64::from(v)),
+		};
 
 		let font_dirs: Vec<PathBuf> = opts
 			.font_dirs
