@@ -351,8 +351,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          # CRT を /MT (静的) に変えたため v2 とは別キーにする。
-          shared-key: napi-x86_64-pc-windows-msvc-v3
+          shared-key: napi-x86_64-pc-windows-msvc
 
       - name: Install npm dependencies
         working-directory: napi
