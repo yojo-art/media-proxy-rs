@@ -517,6 +517,27 @@ jobs:
           # pre-publish 既定では GH Release 作成と optional の公開まで行うため抑止する。
           npx napi pre-publish --npm-dir ./npm -t npm --no-gh-release --skip-optional-publish
 
+      - name: Verify optionalDependencies
+        # 1.0.0 は pre-publish 未実行のまま手動公開され、optionalDependencies 無しで
+        # 出てしまった。再発防止のため、npm/ 配下の全 platform パッケージが
+        # 対応する版で optionalDependencies に載っていることを検査する。
+        working-directory: napi
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = require('./package.json');
+            const opt = pkg.optionalDependencies || {};
+            const bad = fs.readdirSync('./npm').filter((d) => {
+              const p = require('./npm/' + d + '/package.json');
+              return opt[p.name] !== p.version || p.version !== pkg.version;
+            });
+            if (bad.length) {
+              console.error('optionalDependencies mismatch for: ' + bad.join(', '));
+              process.exit(1);
+            }
+            console.log('optionalDependencies OK: ' + Object.keys(opt).join(', '));
+          "
+
       - name: Pack check (dry-run)
         working-directory: napi
         run: |

@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "media-proxy-napi"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "media-proxy-rs",
  "napi",
@@ -1988,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "media-proxy-rs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "avif-decoder_dep",
  "axum",
