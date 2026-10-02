@@ -185,7 +185,7 @@ jobs:
           pkg-config --modversion dav1d
           pkg-config --modversion lcms2
 
-      - name: Install Rust stable
+      - name: Install Rust (rust-toolchain.toml と同じ版)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
