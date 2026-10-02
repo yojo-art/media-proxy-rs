@@ -287,7 +287,7 @@ jobs:
       PKG_CONFIG_PATH: C:/napi-deps/dav1d/lib/pkgconfig;C:/napi-deps/lcms2/lib/pkgconfig
       # dav1d-sys の内蔵ビルドは 1.5.0 固定のため、事前ビルドの 1.5.4 を
       # 優先させる (見つからなければ内蔵ビルドにフォールバック)。
-      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: auto
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: never
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
