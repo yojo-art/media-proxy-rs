@@ -453,13 +453,13 @@ jobs:
           subject-path: release/*.gz
 
   publish-npm:
-    name: publish npm (GitHub Packages)
+    name: publish npm (npmjs.com, OIDC trusted publishing)
     runs-on: ubuntu-latest
     needs: [build, build-darwin-arm64, build-windows-msvc]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read
-      packages: write
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -479,10 +479,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@yojo-art'
           cache: 'npm'
           cache-dependency-path: napi/package-lock.json
+
+      - name: Update npm for OIDC trusted publishing
+        run: |
+          # OIDC 信頼公開には npm >= 11.5.1 が必要 (Node 22 同梱の npm では足りない)。
+          npm install -g npm@latest
+          npm --version
 
       - name: Install npm dependencies
         working-directory: napi
@@ -523,23 +527,18 @@ jobs:
           npm publish --dry-run
 
       - name: Publish optional platform packages
-        working-directory: napi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # OIDC 信頼公開のためトークン不要。初回公開の scoped パッケージには --access public が要る。
         run: |
           # 再実行に備え、公開済みの版はスキップする。
-          for dir in npm/*; do
+          for dir in napi/npm/*; do
             name=$(node -p "require('./$dir/package.json').name")
             version=$(node -p "require('./$dir/package.json').version")
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "$name@$version is already published, skipping"
               continue
             fi
-            npm publish "./$dir"
+            npm publish --provenance --access public "./$dir"
           done
 
       - name: Publish root package
-        working-directory: napi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm publish
+        run: npm publish --provenance --access public ./napi
