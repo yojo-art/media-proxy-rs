@@ -1,0 +1,16 @@
+[package]
+name = "media-proxy-napi"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3.13", features = ["napi9", "async", "tokio_rt"] }
+napi-derive = "3.6"
+tokio = { version = "1.53", features = ["rt-multi-thread", "sync", "time"] }
+media-proxy-rs = { path = "..", default-features = false, features = ["avif-decoder"] }
+
+[build-dependencies]
+napi-build = "2"

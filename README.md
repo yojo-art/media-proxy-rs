@@ -60,6 +60,17 @@ amd64ではデフォルトでx86-64-v3向けにビルドしますが、x86-64-v3
 2. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
 3. `cargo build --release`
 
+## Node.js バインディング (napi)
+
+画像のリサイズ、再エンコード機能のみ提供されます  
+
+対応プラットフォーム:
+
+- `linux-x64-gnu` (glibc 2.28 以上)
+- `linux-arm64-gnu` (glibc 2.28 以上)
+- `darwin-arm64` (macOS 11.0 以上)
+- `win32-x64-msvc` (Windows 10/11)
+
 ## 対応する画像形式
 - AVIF(dav1d)
 - BMP

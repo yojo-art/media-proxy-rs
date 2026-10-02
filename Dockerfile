@@ -32,8 +32,10 @@ ENV PKG_CONFIG_PATH=/dav1d/lib/pkgconfig
 ENV LD_LIBRARY_PATH=/dav1d/lib
 COPY src ./src
 COPY Cargo.toml ./Cargo.toml
+COPY Cargo.lock ./Cargo.lock
 COPY asset ./asset
 COPY examples ./examples
+COPY napi ./napi
 RUN --mount=type=cache,target=/var/cache/cargo --mount=type=cache,target=/app/target bash /app/crossfiles/build.sh
 
 FROM alpine:latest

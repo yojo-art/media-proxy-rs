@@ -2,4 +2,9 @@
 /config.json
 /compose.yml
 /config/config.json
+# napi
+/napi/node_modules
+/napi/*.node
+/napi/index.js
+/napi/index.d.ts
 

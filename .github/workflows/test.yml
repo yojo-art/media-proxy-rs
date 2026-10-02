@@ -1,0 +1,83 @@
+name: cargo test / napi test
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config nasm libssl-dev libopenjp2-7-dev liblcms2-dev libdav1d-dev meson ninja-build
+
+      - name: Install Rust (rust-toolchain.toml と同じ版)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run cargo test (default features)
+        run: cargo test
+
+      - name: Run cargo test (avif-decoder only)
+        run: cargo test --no-default-features --features avif-decoder
+
+  napi-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config nasm libssl-dev libopenjp2-7-dev liblcms2-dev libdav1d-dev meson ninja-build
+
+      - name: Install Rust (rust-toolchain.toml と同じ版)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: napi/package-lock.json
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-napi-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install npm dependencies
+        working-directory: napi
+        run: npm ci
+
+      - name: Build napi
+        working-directory: napi
+        run: npm run build
+
+      - name: Run napi tests
+        working-directory: napi
+        run: npm test

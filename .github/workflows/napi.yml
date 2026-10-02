@@ -1,0 +1,544 @@
+name: NAPI
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # dav1d / lcms2 の版はここに1か所だけ書く。
+  # Linux Docker には build-args で渡し、macOS / Windows は build-deps.sh の
+  # 環境変数として参照する。上げる際は3か所まとめて確認すること。
+  DAV1D_VERSION: 1.5.4
+  LCMS2_VERSION: lcms2.16
+  # 全プラットフォームで Rust 1.97.1 に固定 (rust-toolchain.toml と同じ値)。
+  RUST_VERSION: 1.97.1
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            platform: linux-x64-gnu
+            dockerfile_target: out-x86_64
+          - target: aarch64-unknown-linux-gnu
+            platform: linux-arm64-gnu
+            dockerfile_target: out-aarch64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          image: tonistiigi/binfmt:latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build napi binary in Docker
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: .github/napi/Dockerfile
+          target: ${{ matrix.dockerfile_target }}
+          # 版は workflow の env から渡す (Dockerfile の ARG 既定値に頼らない)。
+          build-args: |
+            RUST_VERSION=${{ env.RUST_VERSION }}
+            DAV1D_VERSION=${{ env.DAV1D_VERSION }}
+            LCMS2_VERSION=${{ env.LCMS2_VERSION }}
+          outputs: type=local,dest=./napi-out
+          cache-from: type=gha,scope=napi-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=napi-${{ matrix.target }}
+
+      - name: Rename artifact
+        run: |
+          mkdir -p artifacts
+          mv ./napi-out/media-proxy-napi.${{ matrix.platform }}.node ./artifacts/media-proxy-napi.${{ matrix.platform }}.node
+
+      - name: Stage index.js/index.d.ts for release
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          # index.js は全プラットフォーム共通のローダー。x86_64 の物を代表で使う。
+          cp ./napi-out/index.js ./artifacts/index.js
+          cp ./napi-out/index.d.ts ./artifacts/index.d.ts
+
+      - name: Smoke test (x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          node -e '
+            const { MediaProcessor } = require("./artifacts/media-proxy-napi.${{ matrix.platform }}.node");
+            const fs = require("fs");
+            const png = fs.readFileSync("asset/dummy.png");
+            (async () => {
+              const p = new MediaProcessor();
+              const avatar = await p.process(png, { avatar: true });
+              if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
+              const badge = await p.process(png, { badge: true });
+              if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
+              console.log("x86_64 smoke test ok");
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Smoke test (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD/artifacts:/artifacts:ro" \
+            -v "$PWD/asset/dummy.png:/dummy.png:ro" \
+            node:22-slim \
+            node -e '
+              const { MediaProcessor } = require("/artifacts/media-proxy-napi.linux-arm64-gnu.node");
+              const fs = require("fs");
+              const png = fs.readFileSync("/dummy.png");
+              (async () => {
+                const p = new MediaProcessor();
+                const avatar = await p.process(png, { avatar: true });
+                if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
+                const badge = await p.process(png, { badge: true });
+                if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
+                console.log("aarch64 smoke test ok");
+              })().catch(e => { console.error(e); process.exit(1); });
+            '
+
+      - name: Gzip artifact
+        working-directory: artifacts
+        run: gzip -9 media-proxy-napi.${{ matrix.platform }}.node
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: media-proxy-napi-${{ matrix.target }}
+          path: artifacts/media-proxy-napi.${{ matrix.platform }}.node.gz
+          if-no-files-found: error
+
+      - name: Upload JS binding artifact
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: media-proxy-napi-js
+          path: |
+            artifacts/index.js
+            artifacts/index.d.ts
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/media-proxy-napi.${{ matrix.platform }}.node.gz
+
+  build-darwin-arm64:
+    name: build (aarch64-apple-darwin)
+    # Apple Silicon ネイティブランナーでクロスなしにビルドする。
+    # macos-14 は arm64 (M1) ランナー。latest 系に追従せず固定する。
+    runs-on: macos-14
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      # 古い macOS でも読み込めるよう最低対応バージョンを明示する (2-3)。
+      # rustc の既定値は 11.0 だが、meson/clang で作る dav1d/lcms2 側にも
+      # 同じ値を効かせるためジョブ全体に付ける。
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      # build-deps.sh で作った静的ライブラリのみを見せる
+      # (Linux Docker と同じ構成。static のみなので静的リンクになる)。
+      PKG_CONFIG_PATH: /tmp/napi-deps/dav1d/lib/pkgconfig:/tmp/napi-deps/lcms2/lib/pkgconfig
+      # dav1d-sys の内蔵ビルドは 1.5.0 固定のため、事前ビルドの版を
+      # 優先させる (見つからなければ内蔵ビルドにフォールバック)。
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: never
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          # C/C++ 依存は .github/napi/build-deps.sh でソースから静的ビルドする
+          # (Linux Docker と同じスクリプト・同じバージョン。dav1d の取得元は
+          # github ミラー https://github.com/videolan/dav1d.git)。
+          # openjp2 は pure-Rust 実装のため不要。
+          # `brew update` は Tier-3 の macos-14 でボトルの無い新版定義を引き、
+          # 依存のソースビルド＋リンク衝突 (openssl@3 vs openssl@1.1) を
+          # 起こしたため実行しない (ピン留め済みボトルをそのまま使う)。
+          brew install pkg-config meson ninja nasm
+
+      - name: Build dav1d/lcms2 static libs (GitHub mirror)
+        run: |
+          # Linux Docker (.github/napi/Dockerfile) と同じ物を使う。
+          # 版は workflow の env (DAV1D_VERSION/LCMS2_VERSION) から取ること。
+          # Dockerfile の ARG と合わせるのを忘れないこと。
+          # インストール先は build-deps.sh の既定 (/tmp/napi-deps 配下。SIP 対応)。
+          DAV1D_VERSION=${{ env.DAV1D_VERSION }} LCMS2_VERSION=${{ env.LCMS2_VERSION }} bash .github/napi/build-deps.sh
+
+      - name: Verify dav1d/lcms2 versions
+        run: |
+          pkg-config --modversion dav1d
+          pkg-config --modversion lcms2
+
+      - name: Install Rust (rust-toolchain.toml と同じ版)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: napi/package-lock.json
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: napi-aarch64-apple-darwin-static
+
+      - name: Install npm dependencies
+        working-directory: napi
+        run: npm ci
+
+      - name: Build napi binary (native)
+        working-directory: napi
+        run: |
+          # リポジトリルートでの `npx napi` はローカル CLI を見つけられず
+          # レジストリの別名パッケージ `napi` を取得しようとして失敗するため、
+          # npm ci 済みのローカル @napi-rs/cli を npm run 経由で使う。
+          # ネイティブビルドなので --target 不要 (darwin-arm64 になる)。
+          # PKG_CONFIG_PATH / SYSTEM_DEPS_* はジョブの env から継承する。
+          npm run build
+
+      - name: Rename artifact
+        run: |
+          mkdir -p artifacts
+          mv ./napi/media-proxy-napi.darwin-arm64.node ./artifacts/media-proxy-napi.darwin-arm64.node
+
+      - name: Inspect linked libs (informational)
+        run: |
+          otool -L ./artifacts/media-proxy-napi.darwin-arm64.node || true
+          # 最低対応バージョン (minos) が MACOSX_DEPLOYMENT_TARGET 通りか見る。
+          otool -l ./artifacts/media-proxy-napi.darwin-arm64.node | grep -A3 LC_BUILD_VERSION || true
+
+      - name: Smoke test (native)
+        run: |
+          node -e '
+            const { MediaProcessor } = require("./artifacts/media-proxy-napi.darwin-arm64.node");
+            const fs = require("fs");
+            const png = fs.readFileSync("asset/dummy.png");
+            (async () => {
+              const p = new MediaProcessor();
+              const avatar = await p.process(png, { avatar: true });
+              if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
+              const badge = await p.process(png, { badge: true });
+              if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
+              console.log("darwin-arm64 smoke test ok");
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Gzip artifact
+        working-directory: artifacts
+        run: gzip -9 media-proxy-napi.darwin-arm64.node
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: media-proxy-napi-aarch64-apple-darwin
+          path: artifacts/media-proxy-napi.darwin-arm64.node.gz
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/media-proxy-napi.darwin-arm64.node.gz
+
+  build-windows-msvc:
+    name: build (x86_64-pc-windows-msvc)
+    # Windows ネイティブランナーで MSVC ビルドする (macOS 版と同じ方針)。
+    # mingw (x86_64-pc-windows-gnu) での Linux クロスは jpegxr (SAL マクロ +
+    # バックスラッシュ include) が原因で不可であり、作れても MSYS2 版 Node 専用で
+    # 公式 Node.js では動かないため、公式 Node.js 向けの msvc をネイティブで作る。
+    # windows-2022 に固定する (latest 追従で MSVC/Windows SDK が変わるのを避ける)。
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      # meson / cc-rs に MSVC (cl) を使わせる。指定しないと
+      # Strawberry 同梱の mingw-gcc を掴み、MSVC リンクと不整合を起こす。
+      CC: cl
+      CXX: cl
+      # build-deps.sh で作った静的ライブラリを pkg-config 経由で使わせる
+      # (Linux/macOS と同じ版。区切り文字は Windows の `;`)。
+      # ジョブの env では runner コンテキストが使えないため固定パスにする。
+      PKG_CONFIG_PATH: C:/napi-deps/dav1d/lib/pkgconfig;C:/napi-deps/lcms2/lib/pkgconfig
+      # dav1d-sys の内蔵ビルドは 1.5.0 固定のため、事前ビルドの 1.5.4 を
+      # 優先させる (見つからなければ内蔵ビルドにフォールバック)。
+      SYSTEM_DEPS_DAV1D_BUILD_INTERNAL: never
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install system dependencies
+        run: |
+          # pkgconfiglite: build-deps.sh で作った dav1d/lcms2 を
+          # pkg-config 経由で探すために必要。Strawberry 同梱の
+          # pkg-config.bat は broken 扱いのため別途用意。
+          choco install -y nasm ninja llvm pkgconfiglite
+          # choco の nasm は EXE 形式で C:\Program Files\NASM に入り、
+          # その場の PATH に載らないため GITHUB_PATH で後段に引き継ぐ。
+          # (meson が "Program 'nasm' not found" で落ちる対策)
+          $nasmDir = 'C:\Program Files\NASM'
+          if (Test-Path (Join-Path $nasmDir 'nasm.exe')) {
+            Add-Content -Path $env:GITHUB_PATH -Value $nasmDir
+            $env:Path = "$nasmDir;$env:Path"
+          }
+          nasm -v
+          pip install meson
+
+      - name: Build dav1d/lcms2 static libs (same versions as Linux/macOS)
+        shell: bash
+        run: |
+          # Git Bash は起動時に /usr/bin (C:\Program Files\Git\usr\bin) を PATH 先頭に
+          # 足すため、中の GNU link.exe が MSVC の link.exe を隠してしまう。
+          # meson はこれを検出して "Found GNU link.exe instead of MSVC link.exe" で
+          # 落ちるため、MSVC の bin (cl と link が同居) を PATH 先頭に戻す。
+          MSVC_BIN="$(dirname "$(which cl)")"
+          export PATH="$MSVC_BIN:$PATH"
+          which -a link || true
+          # Linux Docker / macOS と同じスクリプト・同じ版を使う。
+          # 版は workflow の env (DAV1D_VERSION/LCMS2_VERSION) から取ること。
+          # インストール先はジョブの PKG_CONFIG_PATH と同じ C:/napi-deps にする
+          # (Git Bash の /tmp は素の meson に渡せないため)。
+          # Rust 側は .cargo/config.toml で /MT (静的 CRT) のため、
+          # meson 側も -Db_vscrt=mt で合わせる (食い違うとリンクで壊れる)。
+          DEPS_PREFIX="C:/napi-deps" \
+          DAV1D_VERSION="${{ env.DAV1D_VERSION }}" \
+          LCMS2_VERSION="${{ env.LCMS2_VERSION }}" \
+          MESON_VSCRT=mt \
+          bash .github/napi/build-deps.sh
+
+      - name: Verify dav1d/lcms2 versions
+        shell: bash
+        run: |
+          pkg-config --modversion dav1d
+          pkg-config --modversion lcms2
+
+      - name: Install Rust (rust-toolchain.toml と同じ版)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: napi/package-lock.json
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: napi-x86_64-pc-windows-msvc
+
+      - name: Install npm dependencies
+        working-directory: napi
+        run: npm ci
+
+      - name: Build napi binary (native)
+        working-directory: napi
+        run: |
+          # ネイティブビルドなので --target 不要 (win32-x64-msvc になる)。
+          npm run build
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          mv ./napi/media-proxy-napi.win32-x64-msvc.node ./artifacts/media-proxy-napi.win32-x64-msvc.node
+
+      - name: Smoke test (native)
+        shell: bash
+        run: |
+          node -e '
+            const { MediaProcessor } = require("./artifacts/media-proxy-napi.win32-x64-msvc.node");
+            const fs = require("fs");
+            const png = fs.readFileSync("asset/dummy.png");
+            (async () => {
+              const p = new MediaProcessor();
+              const avatar = await p.process(png, { avatar: true });
+              if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
+              const badge = await p.process(png, { badge: true });
+              if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
+              console.log("win32-x64-msvc smoke test ok");
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Gzip artifact
+        shell: bash
+        working-directory: artifacts
+        run: gzip -9 media-proxy-napi.win32-x64-msvc.node
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: media-proxy-napi-x86_64-pc-windows-msvc
+          path: artifacts/media-proxy-napi.win32-x64-msvc.node.gz
+          if-no-files-found: error
+
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/media-proxy-napi.win32-x64-msvc.node.gz
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, build-darwin-arm64, build-windows-msvc]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: downloaded
+          pattern: media-proxy-napi-*
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find downloaded -name '*.gz' -exec cp {} release/ \;
+          find downloaded -name 'index.d.ts' -exec cp {} release/index.d.ts \;
+
+      - name: Generate SHA256SUMS
+        working-directory: release
+        run: sha256sum *.gz *.d.ts > SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          gh release create "${tag}" \
+            --repo "${{ github.repository }}" \
+            --title "${tag}" \
+            --generate-notes \
+            release/*
+
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/*.gz
+
+  publish-npm:
+    name: publish npm (npmjs.com, OIDC trusted publishing)
+    runs-on: ubuntu-latest
+    needs: [build, build-darwin-arm64, build-windows-msvc]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check tag matches napi/package.json version
+        run: |
+          # バージョンは手動管理。タグと package.json の版が違うと
+          # 誤った版で公開するため、ここで止める。
+          tag=${GITHUB_REF#refs/tags/}
+          pkg=$(node -p "require('./napi/package.json').version")
+          if [ "$tag" != "v$pkg" ]; then
+            echo "tag $tag does not match napi/package.json version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: napi/package-lock.json
+
+      - name: Update npm for OIDC trusted publishing
+        run: |
+          # OIDC 信頼公開には npm >= 11.5.1 が必要 (Node 22 同梱の npm では足りない)。
+          npm install -g npm@latest
+          npm --version
+
+      - name: Install npm dependencies
+        working-directory: napi
+        run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: downloaded
+          pattern: media-proxy-napi-*
+
+      - name: Prepare npm dirs
+        working-directory: napi
+        run: |
+          # .node.gz を戻して artifacts/ に置き、napi artifacts で npm/ に振り分ける。
+          # index.js / index.d.ts はビルド生成物をそのまま使う。
+          shopt -s nullglob
+          mkdir -p artifacts
+          for f in ../downloaded/media-proxy-napi-*/media-proxy-napi.*.node.gz; do
+            gzip -dc "$f" > "artifacts/$(basename "$f" .gz)"
+          done
+          ls artifacts
+          cp ../downloaded/media-proxy-napi-js/index.js ./index.js
+          cp ../downloaded/media-proxy-napi-js/index.d.ts ./index.d.ts
+          npx napi create-npm-dirs --npm-dir ./npm
+          npx napi artifacts --output-dir ./artifacts --npm-dir ./npm
+          # GH Release への添付と npm 公開は別ジョブ/別ステップで行う。
+          # pre-publish 既定では GH Release 作成と optional の公開まで行うため抑止する。
+          npx napi pre-publish --npm-dir ./npm -t npm --no-gh-release --skip-optional-publish
+
+      - name: Pack check (dry-run)
+        working-directory: napi
+        run: |
+          # 先頭に ./ が無いと npm が user/repo 形式と誤認するため付ける。
+          for dir in npm/*; do
+            npm publish --dry-run "./$dir"
+          done
+          npm publish --dry-run
+
+      - name: Publish optional platform packages
+        # OIDC 信頼公開のためトークン不要。初回公開の scoped パッケージには --access public が要る。
+        run: |
+          # 再実行に備え、公開済みの版はスキップする。
+          for dir in napi/npm/*; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published, skipping"
+              continue
+            fi
+            npm publish --provenance --access public "./$dir"
+          done
+
+      - name: Publish root package
+        run: npm publish --provenance --access public ./napi
