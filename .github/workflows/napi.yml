@@ -512,7 +512,6 @@ jobs:
           # GH Release への添付と npm 公開は別ジョブ/別ステップで行う。
           # pre-publish 既定では GH Release 作成と optional の公開まで行うため抑止する。
           npx napi pre-publish --npm-dir ./npm -t npm --no-gh-release --skip-optional-publish
-          npx napi version --npm-dir ./npm
 
       - name: Pack check (dry-run)
         working-directory: napi
