@@ -159,8 +159,8 @@ impl MediaProcessor {
 
 	/// 画像を処理し、エンコード済みデータを返す。
 	///
-	/// 同時実行数は `concurrency` で制限され、30 秒以上待ちになった場合は
-	/// `code` が `"Overloaded"` の Error を投げる。
+	/// 同時実行数は `concurrency` で制限される。待ち行列が `maxQueue` を超えた場合、
+	/// または 30 秒以上待ちになった場合は `code` が `"Overloaded"` の Error を投げる。
 	/// 処理自体が `timeoutMs` を超えた場合は `code` が `"Timeout"` の Error を投げる。
 	///
 	/// 入力の `src` は blocking スレッドへ渡す前にコピーするため、呼び出し後に
