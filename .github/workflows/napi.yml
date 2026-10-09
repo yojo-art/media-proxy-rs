@@ -135,7 +135,7 @@ jobs:
 
       - name: Attest build provenance
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/media-proxy-napi.${{ matrix.platform }}.node.gz
 
@@ -260,7 +260,7 @@ jobs:
 
       - name: Attest build provenance
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/media-proxy-napi.darwin-arm64.node.gz
 
@@ -404,7 +404,7 @@ jobs:
 
       - name: Attest build provenance
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/media-proxy-napi.win32-x64-msvc.node.gz
 
@@ -448,7 +448,7 @@ jobs:
             release/*
 
       - name: Attest release provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: release/*.gz
 
