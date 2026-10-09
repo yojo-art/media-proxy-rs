@@ -24,7 +24,7 @@ jobs:
           toolchain: "1.97.1"
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -62,7 +62,7 @@ jobs:
           cache-dependency-path: napi/package-lock.json
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
