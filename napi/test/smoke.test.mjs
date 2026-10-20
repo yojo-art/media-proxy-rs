@@ -90,6 +90,19 @@ test('出力サイズと WebP 品質を都度指定できる', async () => {
 	assert.deepEqual(streamed.data, sized.data);
 });
 
+test('lossless WebP を出力できる', async () => {
+	const p = new MediaProcessor();
+	const lossless = await p.process(dummyPng, { lossless: true });
+	const lossy = await p.process(dummyPng, {});
+	assert.equal(lossless.contentType, 'image/webp');
+	assert.equal(lossless.ext, '.webp');
+	assert.notDeepEqual(lossless.data, lossy.data);
+	const streamed = await p.processStream(Readable.from([dummyPng]), {
+		lossless: true,
+	});
+	assert.deepEqual(streamed.data, lossless.data);
+});
+
 test('範囲外の process オプションはエラー', () => {
 	const p = new MediaProcessor();
 	assert.throws(() => p.process(dummyPng, { width: 0 }));

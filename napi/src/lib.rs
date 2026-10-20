@@ -67,6 +67,8 @@ pub struct ProcessOptions {
 	/// WebP の品質 (0..=100)。未指定なら構築時の `webpQuality` を使う。
 	#[napi(js_name = "webpQuality")]
 	pub webp_quality: Option<f64>,
+	/// WebP を可逆圧縮で出力する。
+	pub lossless: Option<bool>,
 }
 
 /// `process` の結果。
@@ -176,6 +178,7 @@ fn lib_process_options(opts: ProcessOptions) -> Result<LibProcessOptions> {
 		width,
 		height,
 		webp_quality,
+		lossless: opts.lossless.unwrap_or(false),
 	})
 }
 

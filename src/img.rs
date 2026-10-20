@@ -561,15 +561,27 @@ pub(crate) fn encode_mng(
 	encode_anim(frames, loop_count, opts, cfg)
 }
 
+fn webp_config(
+	opts: &ProcessOptions,
+	cfg: &ProcessorConfig,
+) -> Result<webp::WebPConfig, ProcessError> {
+	let mut config = webp::WebPConfig::new()
+		.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
+	config.quality = opts.webp_quality.unwrap_or(cfg.webp_quality);
+	if opts.lossless {
+		config.lossless = 1;
+		config.alpha_compression = 0;
+	}
+	Ok(config)
+}
+
 pub(crate) fn encode_anim(
 	frames: image::Frames,
 	loop_count: u32,
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
 ) -> Result<Encoded, ProcessError> {
-	let mut conf = webp::WebPConfig::new()
-		.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
-	conf.quality = opts.webp_quality.unwrap_or(cfg.webp_quality);
+	let conf = webp_config(opts, cfg)?;
 	let mut size: Option<(u32, u32)> = None;
 	let mut encoder = None;
 	let mut available_frames = 0;
@@ -699,9 +711,7 @@ pub(crate) fn response_img(
 		})
 	} else {
 		let encoder = webp::Encoder::from_rgba(rgba.as_raw(), width, height);
-		let mut config = webp::WebPConfig::new()
-			.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
-		config.quality = opts.webp_quality.unwrap_or(cfg.webp_quality);
+		let config = webp_config(opts, cfg)?;
 		let mem = encoder.encode_advanced(&config).map_err(|e| {
 			ProcessError::new(ProcessErrorKind::Encode, format!("webp encode {:?}", e))
 		})?;

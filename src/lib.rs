@@ -94,6 +94,8 @@ pub struct ProcessOptions {
 	pub height: Option<u32>,
 	/// WebP の品質 (0..=100)。None なら `ProcessorConfig::webp_quality` を使う。
 	pub webp_quality: Option<f32>,
+	/// WebP を可逆圧縮で出力する。品質は圧縮効率の調整に使われる。
+	pub lossless: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -420,6 +422,36 @@ mod tests {
 			)
 			.unwrap();
 		assert!(high.bytes.len() > low.bytes.len());
+	}
+
+	#[test]
+	fn process_respects_lossless_webp() {
+		let mut img = image::RgbaImage::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Rgba([x as u8 * 16, y as u8 * 16, 128, 200]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageRgba8(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig::default());
+		let lossy = processor.process(&src, &ProcessOptions::default()).unwrap();
+		let lossless = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(lossless.content_type, "image/webp");
+		assert_ne!(lossless.bytes, lossy.bytes);
+		let decoded =
+			image::load_from_memory_with_format(&lossless.bytes, image::ImageFormat::WebP)
+				.unwrap()
+				.into_rgba8();
+		assert_eq!(decoded, img);
 	}
 
 	#[test]
