@@ -684,6 +684,7 @@ async fn get_file(
 		badge: q.badge.is_some(),
 		content_type_hint,
 		accept_avif: is_accept_avif,
+		..Default::default()
 	};
 	let processor = processor.clone();
 	let task = tokio::runtime::Handle::current().spawn_blocking(move || {

@@ -86,6 +86,14 @@ pub struct ProcessOptions {
 	pub badge: bool,
 	pub content_type_hint: Option<String>,
 	pub accept_avif: bool,
+	/// 出力の最大幅。アスペクト比を維持してこの幅に収める。
+	/// None ならプリセットまたは `ProcessorConfig::max_pixels` を使う。
+	pub width: Option<u32>,
+	/// 出力の最大高さ。アスペクト比を維持してこの高さに収める。
+	/// None ならプリセットまたは `ProcessorConfig::max_pixels` を使う。
+	pub height: Option<u32>,
+	/// WebP の品質 (0..=100)。None なら `ProcessorConfig::webp_quality` を使う。
+	pub webp_quality: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -372,6 +380,46 @@ mod tests {
 		assert_eq!(encoded.content_type, "image/webp");
 		assert_eq!(encoded.ext, ".webp");
 		assert!(!encoded.bytes.is_empty());
+	}
+
+	#[test]
+	fn process_respects_output_size() {
+		let src = include_bytes!("../asset/dummy.png");
+		let processor = Processor::new(ProcessorConfig::default());
+		let opts = ProcessOptions {
+			width: Some(64),
+			height: Some(32),
+			..Default::default()
+		};
+		let encoded = processor.process(src, &opts).unwrap();
+		let img =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::WebP).unwrap();
+		assert_eq!((img.width(), img.height()), (32, 32));
+	}
+
+	#[test]
+	fn process_respects_webp_quality() {
+		let src = include_bytes!("../asset/dummy.png");
+		let processor = Processor::new(ProcessorConfig::default());
+		let low = processor
+			.process(
+				src,
+				&ProcessOptions {
+					webp_quality: Some(1.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let high = processor
+			.process(
+				src,
+				&ProcessOptions {
+					webp_quality: Some(100.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert!(high.bytes.len() > low.bytes.len());
 	}
 
 	#[test]

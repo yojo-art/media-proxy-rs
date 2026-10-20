@@ -78,6 +78,25 @@ test('maxInputBytes を超えると code=TooLarge', async () => {
 	});
 });
 
+test('出力サイズと WebP 品質を都度指定できる', async () => {
+	const p = new MediaProcessor();
+	const sized = await p.process(dummyPng, { width: 64, height: 32, webpQuality: 40 });
+	assert.equal(sized.contentType, 'image/webp');
+	const streamed = await p.processStream(Readable.from([dummyPng]), {
+		width: 64,
+		height: 32,
+		webpQuality: 40,
+	});
+	assert.deepEqual(streamed.data, sized.data);
+});
+
+test('範囲外の process オプションはエラー', () => {
+	const p = new MediaProcessor();
+	assert.throws(() => p.process(dummyPng, { width: 0 }));
+	assert.throws(() => p.process(dummyPng, { height: 16384 }));
+	assert.throws(() => p.process(dummyPng, { webpQuality: 101 }));
+});
+
 test('範囲外のオプションは構築時にエラー', () => {
 	assert.throws(() => new MediaProcessor({ webpQuality: 101 }));
 	assert.throws(() => new MediaProcessor({ maxInputBytes: 0 }));

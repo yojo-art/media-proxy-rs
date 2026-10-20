@@ -58,6 +58,15 @@ pub struct ProcessOptions {
 	pub badge: Option<bool>,
 	#[napi(js_name = "contentType")]
 	pub content_type: Option<String>,
+	/// 出力の最大幅。アスペクト比を維持して収める。
+	/// 未指定ならプリセットまたは構築時の `maxPixels` を使う。
+	pub width: Option<u32>,
+	/// 出力の最大高さ。アスペクト比を維持して収める。
+	/// 未指定ならプリセットまたは構築時の `maxPixels` を使う。
+	pub height: Option<u32>,
+	/// WebP の品質 (0..=100)。未指定なら構築時の `webpQuality` を使う。
+	#[napi(js_name = "webpQuality")]
+	pub webp_quality: Option<f64>,
 }
 
 /// `process` の結果。
@@ -134,6 +143,40 @@ pub struct MediaProcessor {
 
 fn invalid_arg(msg: impl ToString) -> Error {
 	Error::new(Status::InvalidArg, msg.to_string())
+}
+
+const WEBP_MAX_DIMENSION: u32 = 16383;
+
+fn dimension(name: &str, value: Option<u32>) -> Result<Option<u32>> {
+	match value {
+		Some(v) if (1..=WEBP_MAX_DIMENSION).contains(&v) => Ok(Some(v)),
+		Some(_) => Err(invalid_arg(format!(
+			"{name} must be in 1..={WEBP_MAX_DIMENSION}"
+		))),
+		None => Ok(None),
+	}
+}
+
+fn lib_process_options(opts: ProcessOptions) -> Result<LibProcessOptions> {
+	let width = dimension("width", opts.width)?;
+	let height = dimension("height", opts.height)?;
+	let webp_quality = match opts.webp_quality {
+		None => None,
+		Some(q) if q.is_finite() && (0.0..=100.0).contains(&q) => Some(q as f32),
+		Some(_) => return Err(invalid_arg("webpQuality must be in 0..=100")),
+	};
+	Ok(LibProcessOptions {
+		emoji: opts.emoji.unwrap_or(false),
+		avatar: opts.avatar.unwrap_or(false),
+		r#static: opts.r#static.unwrap_or(false),
+		preview: opts.preview.unwrap_or(false),
+		badge: opts.badge.unwrap_or(false),
+		content_type_hint: opts.content_type,
+		accept_avif: false,
+		width,
+		height,
+		webp_quality,
+	})
 }
 
 #[napi]
@@ -246,15 +289,7 @@ impl MediaProcessor {
 		opts: Option<ProcessOptions>,
 	) -> Result<PromiseRaw<'env, ProcessResult>> {
 		let opts = opts.unwrap_or_default();
-		let lib_opts = LibProcessOptions {
-			emoji: opts.emoji.unwrap_or(false),
-			avatar: opts.avatar.unwrap_or(false),
-			r#static: opts.r#static.unwrap_or(false),
-			preview: opts.preview.unwrap_or(false),
-			badge: opts.badge.unwrap_or(false),
-			content_type_hint: opts.content_type,
-			accept_avif: false,
-		};
+		let lib_opts = lib_process_options(opts)?;
 
 		let inner = self.inner.clone();
 		// JS の Buffer を blocking スレッドから直接読むと、reject 後に JS 側が書き換えたときに
@@ -291,15 +326,7 @@ impl MediaProcessor {
 		opts: Option<ProcessOptions>,
 	) -> Result<PromiseRaw<'env, ProcessResult>> {
 		let opts = opts.unwrap_or_default();
-		let lib_opts = LibProcessOptions {
-			emoji: opts.emoji.unwrap_or(false),
-			avatar: opts.avatar.unwrap_or(false),
-			r#static: opts.r#static.unwrap_or(false),
-			preview: opts.preview.unwrap_or(false),
-			badge: opts.badge.unwrap_or(false),
-			content_type_hint: opts.content_type,
-			accept_avif: false,
-		};
+		let lib_opts = lib_process_options(opts)?;
 
 		let next = stream_next_function(env, &stream)?;
 		let inner = self.inner.clone();

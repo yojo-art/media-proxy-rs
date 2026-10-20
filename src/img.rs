@@ -229,22 +229,26 @@ fn gif_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<()
 
 pub(crate) fn image_size_hint(opts: &ProcessOptions, cfg: &ProcessorConfig) -> (u32, u32) {
 	const WEBP_MAX_DIMENSION: u32 = 16383;
-	if opts.badge {
-		return (96, 96);
+	let (mut width, mut height) = if opts.badge {
+		(96, 96)
+	} else if opts.r#static {
+		(498, 422)
+	} else if opts.emoji {
+		(WEBP_MAX_DIMENSION, 128)
+	} else if opts.preview {
+		(200, 200)
+	} else if opts.avatar {
+		(WEBP_MAX_DIMENSION, 320)
+	} else {
+		(cfg.max_pixels, cfg.max_pixels)
+	};
+	if let Some(w) = opts.width {
+		width = w;
 	}
-	if opts.r#static {
-		return (498, 422);
+	if let Some(h) = opts.height {
+		height = h;
 	}
-	if opts.emoji {
-		return (WEBP_MAX_DIMENSION, 128);
-	}
-	if opts.preview {
-		return (200, 200);
-	}
-	if opts.avatar {
-		return (WEBP_MAX_DIMENSION, 320);
-	}
-	(cfg.max_pixels, cfg.max_pixels)
+	(width, height)
 }
 
 pub(crate) fn resize(
@@ -563,8 +567,9 @@ pub(crate) fn encode_anim(
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
 ) -> Result<Encoded, ProcessError> {
-	let conf = webp::WebPConfig::new()
+	let mut conf = webp::WebPConfig::new()
 		.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
+	conf.quality = opts.webp_quality.unwrap_or(cfg.webp_quality);
 	let mut size: Option<(u32, u32)> = None;
 	let mut encoder = None;
 	let mut available_frames = 0;
@@ -696,7 +701,7 @@ pub(crate) fn response_img(
 		let encoder = webp::Encoder::from_rgba(rgba.as_raw(), width, height);
 		let mut config = webp::WebPConfig::new()
 			.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
-		config.quality = cfg.webp_quality;
+		config.quality = opts.webp_quality.unwrap_or(cfg.webp_quality);
 		let mem = encoder.encode_advanced(&config).map_err(|e| {
 			ProcessError::new(ProcessErrorKind::Encode, format!("webp encode {:?}", e))
 		})?;
