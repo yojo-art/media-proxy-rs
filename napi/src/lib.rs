@@ -33,6 +33,9 @@ pub struct MediaProcessorOptions {
 	pub max_input_bytes: Option<f64>,
 	#[napi(js_name = "webpQuality")]
 	pub webp_quality: Option<f64>,
+	/// ロッシー圧縮を AVIF で出力する。可逆 WebP には適用されない。
+	#[napi(js_name = "encodeAvif")]
+	pub encode_avif: Option<bool>,
 	pub concurrency: Option<u32>,
 	#[napi(js_name = "maxQueue")]
 	pub max_queue: Option<u32>,
@@ -174,7 +177,7 @@ fn lib_process_options(opts: ProcessOptions) -> Result<LibProcessOptions> {
 		preview: opts.preview.unwrap_or(false),
 		badge: opts.badge.unwrap_or(false),
 		content_type_hint: opts.content_type,
-		accept_avif: false,
+		accept_avif: true,
 		width,
 		height,
 		webp_quality,
@@ -248,7 +251,7 @@ impl MediaProcessor {
 			max_decode_pixels,
 			filter_type: FilterType::Triangle,
 			webp_quality,
-			encode_avif: false,
+			encode_avif: opts.encode_avif.unwrap_or(false),
 			load_system_fonts: opts.load_system_fonts.unwrap_or(false),
 			font_dirs,
 			default_font_family: opts.default_font_family,

@@ -584,6 +584,19 @@ pub(crate) fn encode_mng(
 	encode_anim(frames, loop_count, opts, cfg)
 }
 
+fn encode_single_avif(rgba: image::RgbaImage) -> Result<Encoded, ProcessError> {
+	let mut buf = vec![];
+	DynamicImage::ImageRgba8(rgba)
+		.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Avif)
+		.map_err(|e| ProcessError::new(ProcessErrorKind::Encode, format!("avif encode {:?}", e)))?;
+	Ok(Encoded {
+		bytes: buf,
+		content_type: "image/avif",
+		ext: ".avif",
+		warning: None,
+	})
+}
+
 fn webp_config(
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
@@ -604,6 +617,8 @@ pub(crate) fn encode_anim(
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
 ) -> Result<Encoded, ProcessError> {
+	// AVIF は image crate 0.25 でアニメーションエンコード未対応のため、
+	// アニメーション入力は WebP アニメーションで出力する。
 	let conf = webp_config(opts, cfg)?;
 	let mut size: Option<(u32, u32)> = None;
 	let mut encoder = None;
@@ -737,18 +752,7 @@ pub(crate) fn response_img(
 	let (width, height) = (img.width(), img.height());
 	let rgba = img.into_rgba8();
 	if opts.accept_avif && cfg.encode_avif {
-		let mut buf = vec![];
-		DynamicImage::ImageRgba8(rgba)
-			.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Avif)
-			.map_err(|e| {
-				ProcessError::new(ProcessErrorKind::Encode, format!("avif encode {:?}", e))
-			})?;
-		Ok(Encoded {
-			bytes: buf,
-			content_type: "image/avif",
-			ext: ".avif",
-			warning: None,
-		})
+		encode_single_avif(rgba)
 	} else {
 		let encoder = webp::Encoder::from_rgba(rgba.as_raw(), width, height);
 		let config = webp_config(opts, cfg)?;
