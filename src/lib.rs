@@ -456,6 +456,47 @@ mod tests {
 	}
 
 	#[test]
+	fn process_lossless_ignores_encode_avif() {
+		let mut img = image::RgbaImage::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Rgba([x as u8 * 16, y as u8 * 16, 128, 200]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageRgba8(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig {
+			encode_avif: true,
+			..Default::default()
+		});
+		let lossy = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					accept_avif: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(lossy.content_type, "image/avif");
+		let lossless = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(lossless.content_type, "image/webp");
+		let decoded =
+			image::load_from_memory_with_format(&lossless.bytes, image::ImageFormat::WebP)
+				.unwrap()
+				.into_rgba8();
+		assert_eq!(decoded, img);
+	}
+
+	#[test]
 	fn process_lossless_16bit_fallback_to_png() {
 		let mut img = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::new(16, 16);
 		for (x, y, p) in img.enumerate_pixels_mut() {

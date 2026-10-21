@@ -358,10 +358,14 @@ impl MediaProcessor {
 	}
 }
 
-fn stream_next_function<'env>(
-	env: &'env Env,
-	stream: &Object<'env>,
-) -> Result<ThreadsafeFunction<(), Promise<ChunkResult>, (), Status, false, true>> {
+type StreamIteratorFunction = ThreadsafeFunction<(), Promise<ChunkResult>, (), Status, false, true>;
+
+struct StreamIterator {
+	next: StreamIteratorFunction,
+	close: StreamIteratorFunction,
+}
+
+fn stream_next_function<'env>(env: &'env Env, stream: &Object<'env>) -> Result<StreamIterator> {
 	let symbol = env.get_global()?.get_named_property::<Function>("Symbol")?;
 	let async_iterator = symbol.get_named_property::<Unknown>("asyncIterator")?;
 	let iter_fn = stream
@@ -371,20 +375,30 @@ fn stream_next_function<'env>(
 	let next_fn = iterator
 		.get_named_property::<Function<(), Promise<ChunkResult>>>("next")
 		.map_err(|_| invalid_arg("stream must be a Node.js Readable"))?;
-	next_fn
+	let return_fn = iterator
+		.get_named_property::<Function<(), Promise<ChunkResult>>>("return")
+		.map_err(|_| invalid_arg("stream must be a Node.js Readable"))?;
+	let close = return_fn
 		.bind(iterator)?
 		.build_threadsafe_function::<()>()
 		.weak::<true>()
-		.build()
+		.build()?;
+	let next = next_fn
+		.bind(iterator)?
+		.build_threadsafe_function::<()>()
+		.weak::<true>()
+		.build()?;
+	Ok(StreamIterator { next, close })
 }
 
 async fn read_stream(
-	next: ThreadsafeFunction<(), Promise<ChunkResult>, (), Status, false, true>,
+	iterator: StreamIterator,
 	max_input_bytes: usize,
 ) -> std::result::Result<Vec<u8>, ProcessFailure> {
 	let mut src = Vec::new();
 	loop {
-		let promise = next
+		let promise = iterator
+			.next
 			.call_async_catch(())
 			.await
 			.map_err(|e| ProcessFailure::Stream(format!("stream read failed: {e}")))?;
@@ -397,6 +411,9 @@ async fn read_stream(
 		if let Some(chunk) = item.value {
 			let new_len = src.len().checked_add(chunk.0.len());
 			if new_len.map_or(true, |len| len > max_input_bytes) {
+				if let Ok(promise) = iterator.close.call_async_catch(()).await {
+					let _ = promise.await;
+				}
 				return Err(ProcessFailure::TooLarge);
 			}
 			src.extend_from_slice(&chunk.0);

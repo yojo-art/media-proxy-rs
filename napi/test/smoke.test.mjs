@@ -73,9 +73,11 @@ test('Readable のエラーは code=Stream', async () => {
 
 test('maxInputBytes を超えると code=TooLarge', async () => {
 	const p = new MediaProcessor({ maxInputBytes: 10 });
-	await assert.rejects(p.processStream(Readable.from([dummyPng]), {}), {
+	const stream = Readable.from([dummyPng]);
+	await assert.rejects(p.processStream(stream, {}), {
 		code: 'TooLarge',
 	});
+	assert.equal(stream.destroyed, true);
 });
 
 test('出力サイズと WebP 品質を都度指定できる', async () => {
@@ -101,6 +103,15 @@ test('lossless WebP を出力できる', async () => {
 		lossless: true,
 	});
 	assert.deepEqual(streamed.data, lossless.data);
+});
+
+test('encodeAvif は lossless 指定で WebP を返す', async () => {
+	const p = new MediaProcessor({ encodeAvif: true });
+	const lossless = await p.process(dummyPng, { lossless: true });
+	const expected = await new MediaProcessor().process(dummyPng, { lossless: true });
+	assert.equal(lossless.contentType, 'image/webp');
+	assert.equal(lossless.ext, '.webp');
+	assert.deepEqual(lossless.data, expected.data);
 });
 
 test('範囲外の process オプションはエラー', () => {

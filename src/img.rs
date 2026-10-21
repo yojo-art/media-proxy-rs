@@ -754,7 +754,7 @@ pub(crate) fn response_img(
 	}
 	let (width, height) = (img.width(), img.height());
 	let rgba = img.into_rgba8();
-	if opts.accept_avif && cfg.encode_avif {
+	if opts.accept_avif && cfg.encode_avif && !opts.lossless {
 		encode_single_avif(rgba)
 	} else {
 		let encoder = webp::Encoder::from_rgba(rgba.as_raw(), width, height);
