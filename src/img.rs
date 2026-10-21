@@ -239,7 +239,7 @@ pub(crate) fn image_size_hint(opts: &ProcessOptions, cfg: &ProcessorConfig) -> (
 		(200, 200)
 	} else if opts.badge {
 		(96, 96)
-	} else  {
+	} else {
 		(cfg.max_pixels, cfg.max_pixels)
 	};
 	if let Some(w) = opts.width {
@@ -254,7 +254,10 @@ pub(crate) fn image_size_hint(opts: &ProcessOptions, cfg: &ProcessorConfig) -> (
 /// WebP 可逆圧縮がネイティブに扱える形式かを判定する。
 /// WebP 可逆圧縮は 8bit RGB/RGBA のみをサポートしている。
 fn is_webp_lossless_compatible(img: &DynamicImage) -> bool {
-	matches!(img, DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_))
+	matches!(
+		img,
+		DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_)
+	)
 }
 
 /// ビット深度や色空間を維持したままリサイズする。

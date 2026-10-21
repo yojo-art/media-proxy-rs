@@ -477,8 +477,8 @@ mod tests {
 			.unwrap();
 		assert_eq!(encoded.content_type, "image/png");
 		assert_eq!(encoded.ext, ".png");
-		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png)
-			.unwrap();
+		let decoded =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png).unwrap();
 		assert!(matches!(decoded, DynamicImage::ImageRgba16(_)));
 		assert_eq!(decoded.into_rgba16(), img);
 	}
@@ -505,8 +505,8 @@ mod tests {
 			.unwrap();
 		assert_eq!(encoded.content_type, "image/png");
 		assert_eq!(encoded.ext, ".png");
-		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png)
-			.unwrap();
+		let decoded =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png).unwrap();
 		assert!(matches!(decoded, DynamicImage::ImageLuma8(_)));
 		assert_eq!(decoded.into_luma8(), img);
 	}
