@@ -95,6 +95,7 @@ pub struct ProcessOptions {
 	/// WebP の品質 (0..=100)。None なら `ProcessorConfig::webp_quality` を使う。
 	pub webp_quality: Option<f32>,
 	/// WebP を可逆圧縮で出力する。品質は圧縮効率の調整に使われる。
+	/// WebP 可逆圧縮で表現できない入力 (16bit 画像など) は PNG で出力される。
 	pub lossless: bool,
 }
 
@@ -452,6 +453,62 @@ mod tests {
 				.unwrap()
 				.into_rgba8();
 		assert_eq!(decoded, img);
+	}
+
+	#[test]
+	fn process_lossless_16bit_fallback_to_png() {
+		let mut img = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Rgba([x as u16 * 4096, y as u16 * 4096, 32768, 65535]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageRgba16(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/png");
+		assert_eq!(encoded.ext, ".png");
+		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png)
+			.unwrap();
+		assert!(matches!(decoded, DynamicImage::ImageRgba16(_)));
+		assert_eq!(decoded.into_rgba16(), img);
+	}
+
+	#[test]
+	fn process_lossless_grayscale_fallback_to_png() {
+		let mut img = image::GrayImage::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Luma([x as u8 * 16 + y as u8]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageLuma8(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/png");
+		assert_eq!(encoded.ext, ".png");
+		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png)
+			.unwrap();
+		assert!(matches!(decoded, DynamicImage::ImageLuma8(_)));
+		assert_eq!(decoded.into_luma8(), img);
 	}
 
 	#[test]
