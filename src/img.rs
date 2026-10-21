@@ -229,17 +229,17 @@ fn gif_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<()
 
 pub(crate) fn image_size_hint(opts: &ProcessOptions, cfg: &ProcessorConfig) -> (u32, u32) {
 	const WEBP_MAX_DIMENSION: u32 = 16383;
-	let (mut width, mut height) = if opts.badge {
-		(96, 96)
-	} else if opts.r#static {
-		(498, 422)
-	} else if opts.emoji {
+	let (mut width, mut height) = if opts.emoji {
 		(WEBP_MAX_DIMENSION, 128)
-	} else if opts.preview {
-		(200, 200)
 	} else if opts.avatar {
 		(WEBP_MAX_DIMENSION, 320)
-	} else {
+	} else if opts.r#static {
+		(498, 422)
+	} else if opts.preview {
+		(200, 200)
+	} else if opts.badge {
+		(96, 96)
+	} else  {
 		(cfg.max_pixels, cfg.max_pixels)
 	};
 	if let Some(w) = opts.width {
