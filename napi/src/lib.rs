@@ -7,14 +7,18 @@ use media_proxy_rs::{
 	Encoded, FilterType, ProcessError, ProcessOptions as LibProcessOptions, Processor,
 	ProcessorConfig,
 };
-use napi::bindgen_prelude::{Buffer, Env, Error, PromiseRaw, Result};
+use napi::bindgen_prelude::{
+	check_status, sys, Buffer, Env, Error, FromNapiValue, Function, JsObjectValue, Object, Promise,
+	PromiseRaw, Result, Uint8Array, Unknown,
+};
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi::{JsValue, Status};
 use napi_derive::napi;
 
 /// NodeJS 側のローダーが互換性を確認するための定数。
 /// `MediaProcessorOptions` / `ProcessOptions` / `ProcessResult` / エラーコード / `preloadFonts` の戻り値を変えたら上げる。
 #[napi]
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// `MediaProcessor` の構築オプション。
 #[napi(object)]
@@ -24,8 +28,14 @@ pub struct MediaProcessorOptions {
 	pub max_pixels: Option<u32>,
 	#[napi(js_name = "maxDecodePixels")]
 	pub max_decode_pixels: Option<f64>,
+	/// `processStream` が受け取る入力の上限 (バイト)。
+	#[napi(js_name = "maxInputBytes")]
+	pub max_input_bytes: Option<f64>,
 	#[napi(js_name = "webpQuality")]
 	pub webp_quality: Option<f64>,
+	/// ロッシー圧縮を AVIF で出力する。可逆 WebP には適用されない。
+	#[napi(js_name = "encodeAvif")]
+	pub encode_avif: Option<bool>,
 	pub concurrency: Option<u32>,
 	#[napi(js_name = "maxQueue")]
 	pub max_queue: Option<u32>,
@@ -51,6 +61,17 @@ pub struct ProcessOptions {
 	pub badge: Option<bool>,
 	#[napi(js_name = "contentType")]
 	pub content_type: Option<String>,
+	/// 出力の最大幅。アスペクト比を維持して収める。
+	/// 未指定ならプリセットまたは構築時の `maxPixels` を使う。
+	pub width: Option<u32>,
+	/// 出力の最大高さ。アスペクト比を維持して収める。
+	/// 未指定ならプリセットまたは構築時の `maxPixels` を使う。
+	pub height: Option<u32>,
+	/// WebP の品質 (0..=100)。未指定なら構築時の `webpQuality` を使う。
+	#[napi(js_name = "webpQuality")]
+	pub webp_quality: Option<f64>,
+	/// WebP を可逆圧縮で出力する。
+	pub lossless: Option<bool>,
 }
 
 /// `process` の結果。
@@ -67,7 +88,57 @@ struct Inner {
 	semaphore: Arc<tokio::sync::Semaphore>,
 	waiting: Arc<AtomicUsize>,
 	max_queue: usize,
+	max_input_bytes: usize,
 	timeout: Duration,
+}
+
+struct StreamChunk(Vec<u8>);
+
+impl FromNapiValue for StreamChunk {
+	unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+		let mut is_buffer = false;
+		check_status!(
+			unsafe { sys::napi_is_buffer(env, napi_val, &mut is_buffer) },
+			"Check Buffer failed"
+		)?;
+		if is_buffer {
+			let buf = unsafe { Buffer::from_napi_value(env, napi_val)? };
+			return Ok(Self(buf.to_vec()));
+		}
+
+		let mut is_typed_array = false;
+		check_status!(
+			unsafe { sys::napi_is_typedarray(env, napi_val, &mut is_typed_array) },
+			"Check TypedArray failed"
+		)?;
+		if is_typed_array {
+			let arr = unsafe { Uint8Array::from_napi_value(env, napi_val)? };
+			return Ok(Self(arr.to_vec()));
+		}
+
+		let string = unsafe { String::from_napi_value(env, napi_val) }
+			.map_err(|_| invalid_arg("stream chunks must be Buffer, Uint8Array, or string"))?;
+		Ok(Self(string.into_bytes()))
+	}
+}
+
+struct ChunkResult {
+	done: bool,
+	value: Option<StreamChunk>,
+}
+
+impl FromNapiValue for ChunkResult {
+	unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+		let obj = unsafe { Object::from_napi_value(env, napi_val) }?;
+		let done = obj
+			.get_named_property::<Option<bool>>("done")?
+			.unwrap_or(false);
+		if done {
+			return Ok(Self { done, value: None });
+		}
+		let value = obj.get_named_property_unchecked::<Option<StreamChunk>>("value")?;
+		Ok(Self { done, value })
+	}
 }
 
 #[napi]
@@ -77,6 +148,41 @@ pub struct MediaProcessor {
 
 fn invalid_arg(msg: impl ToString) -> Error {
 	Error::new(Status::InvalidArg, msg.to_string())
+}
+
+const WEBP_MAX_DIMENSION: u32 = 16383;
+
+fn dimension(name: &str, value: Option<u32>) -> Result<Option<u32>> {
+	match value {
+		Some(v) if (1..=WEBP_MAX_DIMENSION).contains(&v) => Ok(Some(v)),
+		Some(_) => Err(invalid_arg(format!(
+			"{name} must be in 1..={WEBP_MAX_DIMENSION}"
+		))),
+		None => Ok(None),
+	}
+}
+
+fn lib_process_options(opts: ProcessOptions) -> Result<LibProcessOptions> {
+	let width = dimension("width", opts.width)?;
+	let height = dimension("height", opts.height)?;
+	let webp_quality = match opts.webp_quality {
+		None => None,
+		Some(q) if q.is_finite() && (0.0..=100.0).contains(&q) => Some(q as f32),
+		Some(_) => return Err(invalid_arg("webpQuality must be in 0..=100")),
+	};
+	Ok(LibProcessOptions {
+		emoji: opts.emoji.unwrap_or(false),
+		avatar: opts.avatar.unwrap_or(false),
+		r#static: opts.r#static.unwrap_or(false),
+		preview: opts.preview.unwrap_or(false),
+		badge: opts.badge.unwrap_or(false),
+		content_type_hint: opts.content_type,
+		accept_avif: true,
+		width,
+		height,
+		webp_quality,
+		lossless: opts.lossless.unwrap_or(false),
+	})
 }
 
 #[napi]
@@ -97,6 +203,15 @@ impl MediaProcessor {
 			Some(_) => {
 				return Err(invalid_arg(
 					"maxDecodePixels must be a positive finite number",
+				))
+			}
+		};
+		let max_input_bytes = match opts.max_input_bytes {
+			None => 256 * 1024 * 1024,
+			Some(v) if v.is_finite() && v >= 1.0 && v <= usize::MAX as f64 => v as usize,
+			Some(_) => {
+				return Err(invalid_arg(
+					"maxInputBytes must be a positive finite number",
 				))
 			}
 		};
@@ -136,7 +251,7 @@ impl MediaProcessor {
 			max_decode_pixels,
 			filter_type: FilterType::Triangle,
 			webp_quality,
-			encode_avif: false,
+			encode_avif: opts.encode_avif.unwrap_or(false),
 			load_system_fonts: opts.load_system_fonts.unwrap_or(false),
 			font_dirs,
 			default_font_family: opts.default_font_family,
@@ -148,6 +263,7 @@ impl MediaProcessor {
 				semaphore: Arc::new(tokio::sync::Semaphore::new(concurrency)),
 				waiting: Arc::new(AtomicUsize::new(0)),
 				max_queue,
+				max_input_bytes,
 				timeout,
 			}),
 		})
@@ -179,15 +295,7 @@ impl MediaProcessor {
 		opts: Option<ProcessOptions>,
 	) -> Result<PromiseRaw<'env, ProcessResult>> {
 		let opts = opts.unwrap_or_default();
-		let lib_opts = LibProcessOptions {
-			emoji: opts.emoji.unwrap_or(false),
-			avatar: opts.avatar.unwrap_or(false),
-			r#static: opts.r#static.unwrap_or(false),
-			preview: opts.preview.unwrap_or(false),
-			badge: opts.badge.unwrap_or(false),
-			content_type_hint: opts.content_type,
-			accept_avif: false,
-		};
+		let lib_opts = lib_process_options(opts)?;
 
 		let inner = self.inner.clone();
 		// JS の Buffer を blocking スレッドから直接読むと、reject 後に JS 側が書き換えたときに
@@ -207,6 +315,109 @@ impl MediaProcessor {
 				Err(failure) => Err(failure.into_error(env)),
 			},
 		)
+	}
+
+	/// Node.js の `Readable` から画像を読み、`process` と同じ処理を行う。
+	///
+	/// 入力は最後まで読み切ってから処理する (ストリーミングデコードはしない)。
+	/// チャンクは `Buffer` / `Uint8Array` / 文字列を受け付ける。
+	/// 合計が `maxInputBytes` を超えた場合は `code` が `"TooLarge"` の Error、
+	/// ストリームの読み込みに失敗した場合は `code` が `"Stream"` の Error を投げる。
+	/// 待ち行列と `timeoutMs` は読み込み完了後の処理に適用される。
+	#[napi]
+	pub fn process_stream<'env>(
+		&self,
+		env: &'env Env,
+		#[napi(ts_arg_type = "import('node:stream').Readable")] stream: Object<'env>,
+		opts: Option<ProcessOptions>,
+	) -> Result<PromiseRaw<'env, ProcessResult>> {
+		let opts = opts.unwrap_or_default();
+		let lib_opts = lib_process_options(opts)?;
+
+		let next = stream_next_function(env, &stream)?;
+		let inner = self.inner.clone();
+		let max_input_bytes = inner.max_input_bytes;
+
+		env.spawn_future_with_callback(
+			async move {
+				let result = match read_stream(next, max_input_bytes).await {
+					Ok(src) => run(inner, src, lib_opts).await,
+					Err(failure) => Err(failure),
+				};
+				Ok(result)
+			},
+			|env, result| match result {
+				Ok(encoded) => Ok(ProcessResult {
+					data: encoded.bytes.into(),
+					content_type: encoded.content_type.to_owned(),
+					ext: encoded.ext.to_owned(),
+				}),
+				Err(failure) => Err(failure.into_error(env)),
+			},
+		)
+	}
+}
+
+type StreamIteratorFunction = ThreadsafeFunction<(), Promise<ChunkResult>, (), Status, false, true>;
+
+struct StreamIterator {
+	next: StreamIteratorFunction,
+	close: StreamIteratorFunction,
+}
+
+fn stream_next_function<'env>(env: &'env Env, stream: &Object<'env>) -> Result<StreamIterator> {
+	let symbol = env.get_global()?.get_named_property::<Function>("Symbol")?;
+	let async_iterator = symbol.get_named_property::<Unknown>("asyncIterator")?;
+	let iter_fn = stream
+		.get_property::<Unknown, Function<(), Object>>(async_iterator)
+		.map_err(|_| invalid_arg("stream must be a Node.js Readable"))?;
+	let iterator = iter_fn.apply(stream, ())?;
+	let next_fn = iterator
+		.get_named_property::<Function<(), Promise<ChunkResult>>>("next")
+		.map_err(|_| invalid_arg("stream must be a Node.js Readable"))?;
+	let return_fn = iterator
+		.get_named_property::<Function<(), Promise<ChunkResult>>>("return")
+		.map_err(|_| invalid_arg("stream must be a Node.js Readable"))?;
+	let close = return_fn
+		.bind(iterator)?
+		.build_threadsafe_function::<()>()
+		.weak::<true>()
+		.build()?;
+	let next = next_fn
+		.bind(iterator)?
+		.build_threadsafe_function::<()>()
+		.weak::<true>()
+		.build()?;
+	Ok(StreamIterator { next, close })
+}
+
+async fn read_stream(
+	iterator: StreamIterator,
+	max_input_bytes: usize,
+) -> std::result::Result<Vec<u8>, ProcessFailure> {
+	let mut src = Vec::new();
+	loop {
+		let promise = iterator
+			.next
+			.call_async_catch(())
+			.await
+			.map_err(|e| ProcessFailure::Stream(format!("stream read failed: {e}")))?;
+		let item = promise
+			.await
+			.map_err(|e| ProcessFailure::Stream(format!("stream read failed: {e}")))?;
+		if item.done {
+			return Ok(src);
+		}
+		if let Some(chunk) = item.value {
+			let new_len = src.len().checked_add(chunk.0.len());
+			if new_len.map_or(true, |len| len > max_input_bytes) {
+				if let Ok(promise) = iterator.close.call_async_catch(()).await {
+					let _ = promise.await;
+				}
+				return Err(ProcessFailure::TooLarge);
+			}
+			src.extend_from_slice(&chunk.0);
+		}
 	}
 }
 
@@ -264,6 +475,8 @@ impl Drop for DecrementOnDrop {
 
 enum ProcessFailure {
 	Process(ProcessError),
+	Stream(String),
+	TooLarge,
 	Overloaded,
 	Timeout,
 	Task(tokio::task::JoinError),
@@ -273,6 +486,8 @@ impl ProcessFailure {
 	fn code(&self) -> &'static str {
 		match self {
 			ProcessFailure::Process(e) => e.kind.as_str(),
+			ProcessFailure::Stream(_) => "Stream",
+			ProcessFailure::TooLarge => "TooLarge",
 			ProcessFailure::Overloaded => "Overloaded",
 			ProcessFailure::Timeout => "Timeout",
 			ProcessFailure::Task(_) => "Internal",
@@ -282,6 +497,8 @@ impl ProcessFailure {
 	fn message(&self) -> String {
 		match self {
 			ProcessFailure::Process(e) => e.message.clone(),
+			ProcessFailure::Stream(message) => message.clone(),
+			ProcessFailure::TooLarge => "stream input is too large".to_owned(),
 			ProcessFailure::Overloaded => "server overloaded".to_owned(),
 			ProcessFailure::Timeout => "processing timeout".to_owned(),
 			ProcessFailure::Task(e) => format!("processing task failed: {e}"),

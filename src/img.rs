@@ -229,22 +229,52 @@ fn gif_animation_within_budget(data: &[u8], max_decode_pixels: u64) -> Result<()
 
 pub(crate) fn image_size_hint(opts: &ProcessOptions, cfg: &ProcessorConfig) -> (u32, u32) {
 	const WEBP_MAX_DIMENSION: u32 = 16383;
-	if opts.badge {
-		return (96, 96);
+	let (mut width, mut height) = if opts.emoji {
+		(WEBP_MAX_DIMENSION, 128)
+	} else if opts.avatar {
+		(WEBP_MAX_DIMENSION, 320)
+	} else if opts.r#static {
+		(498, 422)
+	} else if opts.preview {
+		(200, 200)
+	} else if opts.badge {
+		(96, 96)
+	} else {
+		(cfg.max_pixels, cfg.max_pixels)
+	};
+	if let Some(w) = opts.width {
+		width = w;
 	}
-	if opts.r#static {
-		return (498, 422);
+	if let Some(h) = opts.height {
+		height = h;
 	}
-	if opts.emoji {
-		return (WEBP_MAX_DIMENSION, 128);
+	(width, height)
+}
+
+/// WebP 可逆圧縮がネイティブに扱える形式かを判定する。
+/// WebP 可逆圧縮は 8bit RGB/RGBA のみをサポートしている。
+fn is_webp_lossless_compatible(img: &DynamicImage) -> bool {
+	matches!(
+		img,
+		DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_)
+	)
+}
+
+/// ビット深度や色空間を維持したままリサイズする。
+/// WebP 可逆圧縮に対応していない入力を PNG で出力する際に使う。
+fn resize_lossless(
+	img: DynamicImage,
+	opts: &ProcessOptions,
+	cfg: &ProcessorConfig,
+) -> Option<DynamicImage> {
+	let (width, height) = image_size_hint(opts, cfg);
+	let max_width = width.min(img.width());
+	let max_height = height.min(img.height());
+	if img.dimensions() == (max_width, max_height) {
+		return Some(img);
 	}
-	if opts.preview {
-		return (200, 200);
-	}
-	if opts.avatar {
-		return (WEBP_MAX_DIMENSION, 320);
-	}
-	(cfg.max_pixels, cfg.max_pixels)
+	let filter = cfg.filter_type.into();
+	Some(img.resize(max_width, max_height, filter))
 }
 
 pub(crate) fn resize(
@@ -557,14 +587,42 @@ pub(crate) fn encode_mng(
 	encode_anim(frames, loop_count, opts, cfg)
 }
 
+fn encode_single_avif(rgba: image::RgbaImage) -> Result<Encoded, ProcessError> {
+	let mut buf = vec![];
+	DynamicImage::ImageRgba8(rgba)
+		.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Avif)
+		.map_err(|e| ProcessError::new(ProcessErrorKind::Encode, format!("avif encode {:?}", e)))?;
+	Ok(Encoded {
+		bytes: buf,
+		content_type: "image/avif",
+		ext: ".avif",
+		warning: None,
+	})
+}
+
+fn webp_config(
+	opts: &ProcessOptions,
+	cfg: &ProcessorConfig,
+) -> Result<webp::WebPConfig, ProcessError> {
+	let mut config = webp::WebPConfig::new()
+		.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
+	config.quality = opts.webp_quality.unwrap_or(cfg.webp_quality);
+	if opts.lossless {
+		config.lossless = 1;
+		config.alpha_compression = 0;
+	}
+	Ok(config)
+}
+
 pub(crate) fn encode_anim(
 	frames: image::Frames,
 	loop_count: u32,
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
 ) -> Result<Encoded, ProcessError> {
-	let conf = webp::WebPConfig::new()
-		.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
+	// AVIF は image crate 0.25 でアニメーションエンコード未対応のため、
+	// アニメーション入力は WebP アニメーションで出力する。
+	let conf = webp_config(opts, cfg)?;
 	let mut size: Option<(u32, u32)> = None;
 	let mut encoder = None;
 	let mut available_frames = 0;
@@ -655,6 +713,23 @@ pub(crate) fn response_img(
 		Some(image::ImageFormat::Jpeg) | Some(image::ImageFormat::Tiff) => exif_rotate(src, img),
 		_ => img,
 	};
+	// lossless 指定時、WebP 可逆圧縮でネイティブに表現できない入力
+	// (16bit 画像など) は PNG で出力し、ビット深度を維持する。
+	if opts.lossless && !opts.badge && !is_webp_lossless_compatible(&img) {
+		let img = resize_lossless(img, opts, cfg)
+			.ok_or_else(|| ProcessError::new(ProcessErrorKind::Encode, "resize failed"))?;
+		let mut buf = vec![];
+		img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+			.map_err(|e| {
+				ProcessError::new(ProcessErrorKind::Encode, format!("png encode {:?}", e))
+			})?;
+		return Ok(Encoded {
+			bytes: buf,
+			content_type: "image/png",
+			ext: ".png",
+			warning: None,
+		});
+	}
 	let img = resize(img, opts, cfg)
 		.ok_or_else(|| ProcessError::new(ProcessErrorKind::Encode, "resize failed"))?;
 	if opts.badge {
@@ -679,24 +754,11 @@ pub(crate) fn response_img(
 	}
 	let (width, height) = (img.width(), img.height());
 	let rgba = img.into_rgba8();
-	if opts.accept_avif && cfg.encode_avif {
-		let mut buf = vec![];
-		DynamicImage::ImageRgba8(rgba)
-			.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Avif)
-			.map_err(|e| {
-				ProcessError::new(ProcessErrorKind::Encode, format!("avif encode {:?}", e))
-			})?;
-		Ok(Encoded {
-			bytes: buf,
-			content_type: "image/avif",
-			ext: ".avif",
-			warning: None,
-		})
+	if opts.accept_avif && cfg.encode_avif && !opts.lossless {
+		encode_single_avif(rgba)
 	} else {
 		let encoder = webp::Encoder::from_rgba(rgba.as_raw(), width, height);
-		let mut config = webp::WebPConfig::new()
-			.map_err(|_| ProcessError::new(ProcessErrorKind::Encode, "webp config"))?;
-		config.quality = cfg.webp_quality;
+		let config = webp_config(opts, cfg)?;
 		let mem = encoder.encode_advanced(&config).map_err(|e| {
 			ProcessError::new(ProcessErrorKind::Encode, format!("webp encode {:?}", e))
 		})?;

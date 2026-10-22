@@ -86,6 +86,17 @@ pub struct ProcessOptions {
 	pub badge: bool,
 	pub content_type_hint: Option<String>,
 	pub accept_avif: bool,
+	/// 出力の最大幅。アスペクト比を維持してこの幅に収める。
+	/// None ならプリセットまたは `ProcessorConfig::max_pixels` を使う。
+	pub width: Option<u32>,
+	/// 出力の最大高さ。アスペクト比を維持してこの高さに収める。
+	/// None ならプリセットまたは `ProcessorConfig::max_pixels` を使う。
+	pub height: Option<u32>,
+	/// WebP の品質 (0..=100)。None なら `ProcessorConfig::webp_quality` を使う。
+	pub webp_quality: Option<f32>,
+	/// WebP を可逆圧縮で出力する。品質は圧縮効率の調整に使われる。
+	/// WebP 可逆圧縮で表現できない入力 (16bit 画像など) は PNG で出力される。
+	pub lossless: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -372,6 +383,173 @@ mod tests {
 		assert_eq!(encoded.content_type, "image/webp");
 		assert_eq!(encoded.ext, ".webp");
 		assert!(!encoded.bytes.is_empty());
+	}
+
+	#[test]
+	fn process_respects_output_size() {
+		let src = include_bytes!("../asset/dummy.png");
+		let processor = Processor::new(ProcessorConfig::default());
+		let opts = ProcessOptions {
+			width: Some(64),
+			height: Some(32),
+			..Default::default()
+		};
+		let encoded = processor.process(src, &opts).unwrap();
+		let img =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::WebP).unwrap();
+		assert_eq!((img.width(), img.height()), (32, 32));
+	}
+
+	#[test]
+	fn process_respects_webp_quality() {
+		let src = include_bytes!("../asset/dummy.png");
+		let processor = Processor::new(ProcessorConfig::default());
+		let low = processor
+			.process(
+				src,
+				&ProcessOptions {
+					webp_quality: Some(1.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let high = processor
+			.process(
+				src,
+				&ProcessOptions {
+					webp_quality: Some(100.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert!(high.bytes.len() > low.bytes.len());
+	}
+
+	#[test]
+	fn process_respects_lossless_webp() {
+		let mut img = image::RgbaImage::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Rgba([x as u8 * 16, y as u8 * 16, 128, 200]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageRgba8(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig::default());
+		let lossy = processor.process(&src, &ProcessOptions::default()).unwrap();
+		let lossless = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(lossless.content_type, "image/webp");
+		assert_ne!(lossless.bytes, lossy.bytes);
+		let decoded =
+			image::load_from_memory_with_format(&lossless.bytes, image::ImageFormat::WebP)
+				.unwrap()
+				.into_rgba8();
+		assert_eq!(decoded, img);
+	}
+
+	#[test]
+	fn process_lossless_ignores_encode_avif() {
+		let mut img = image::RgbaImage::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Rgba([x as u8 * 16, y as u8 * 16, 128, 200]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageRgba8(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig {
+			encode_avif: true,
+			..Default::default()
+		});
+		let lossy = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					accept_avif: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(lossy.content_type, "image/avif");
+		let lossless = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(lossless.content_type, "image/webp");
+		let decoded =
+			image::load_from_memory_with_format(&lossless.bytes, image::ImageFormat::WebP)
+				.unwrap()
+				.into_rgba8();
+		assert_eq!(decoded, img);
+	}
+
+	#[test]
+	fn process_lossless_16bit_fallback_to_png() {
+		let mut img = image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Rgba([x as u16 * 4096, y as u16 * 4096, 32768, 65535]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageRgba16(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/png");
+		assert_eq!(encoded.ext, ".png");
+		let decoded =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png).unwrap();
+		assert!(matches!(decoded, DynamicImage::ImageRgba16(_)));
+		assert_eq!(decoded.into_rgba16(), img);
+	}
+
+	#[test]
+	fn process_lossless_grayscale_fallback_to_png() {
+		let mut img = image::GrayImage::new(16, 16);
+		for (x, y, p) in img.enumerate_pixels_mut() {
+			*p = image::Luma([x as u8 * 16 + y as u8]);
+		}
+		let mut src = vec![];
+		DynamicImage::ImageLuma8(img.clone())
+			.write_to(&mut Cursor::new(&mut src), image::ImageFormat::Png)
+			.unwrap();
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/png");
+		assert_eq!(encoded.ext, ".png");
+		let decoded =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png).unwrap();
+		assert!(matches!(decoded, DynamicImage::ImageLuma8(_)));
+		assert_eq!(decoded.into_luma8(), img);
 	}
 
 	#[test]
