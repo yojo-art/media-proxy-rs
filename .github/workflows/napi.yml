@@ -436,16 +436,24 @@ jobs:
         working-directory: release
         run: sha256sum *.gz *.d.ts > SHA256SUMS
 
-      - name: Create release
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag=${GITHUB_REF#refs/tags/}
-          gh release create "${tag}" \
-            --repo "${{ github.repository }}" \
-            --title "${tag}" \
-            --generate-notes \
-            release/*
+          if gh release view "${tag}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            # 再実行時は既存リリースへ上書きアップロードする。
+            # 初回に一部の成果物だけアップロードされて失敗した場合も補完できる。
+            gh release upload "${tag}" release/* \
+              --repo "${{ github.repository }}" \
+              --clobber
+          else
+            gh release create "${tag}" \
+              --repo "${{ github.repository }}" \
+              --title "${tag}" \
+              --generate-notes \
+              release/*
+          fi
 
       - name: Attest release provenance
         uses: actions/attest-build-provenance@v4
@@ -542,10 +550,24 @@ jobs:
         working-directory: napi
         run: |
           # 先頭に ./ が無いと npm が user/repo 形式と誤認するため付ける。
+          # npm 12 の dry-run は公開済みバージョンでもエラーになるため、
+          # 再実行時は公開済みのパッケージをスキップする。
           for dir in npm/*; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published, skipping dry-run"
+              continue
+            fi
             npm publish --dry-run "./$dir"
           done
-          npm publish --dry-run
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published, skipping dry-run"
+          else
+            npm publish --dry-run
+          fi
 
       - name: Publish optional platform packages
         # OIDC 信頼公開のためトークン不要。初回公開の scoped パッケージには --access public が要る。
@@ -562,4 +584,12 @@ jobs:
           done
 
       - name: Publish root package
-        run: npm publish --provenance --access public ./napi
+        run: |
+          # 再実行時は公開済みの版をスキップする (npm publish 自体は冪等でない)。
+          name=$(node -p "require('./napi/package.json').name")
+          version=$(node -p "require('./napi/package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published, skipping"
+            exit 0
+          fi
+          npm publish --provenance --access public ./napi
