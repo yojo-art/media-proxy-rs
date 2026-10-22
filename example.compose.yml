@@ -1,7 +1,7 @@
 version: "3"
 services:
   server:
-    image: ghcr.io/yojo-art/media-proxy-rs:main
+    image: ghcr.io/cheripia-dev/media-proxy-rs:main
 #    build: .
     restart: always
     environment:

@@ -5,13 +5,13 @@
 
 ## 実行(Docker)
 ```
-docker run -itd -p 12766:12766 ghcr.io/yojo-art/media-proxy-rs:main
+docker run -itd -p 12766:12766 ghcr.io/cheripia-dev/media-proxy-rs:main
 ```
 
 ## 実行(Linux)
 例(x86_64/amd64)
 ```
-curl -L https://github.com/yojo-art/media-proxy-rs/releases/download/nightly/media-proxy-rs_linux-amd64.gz | gzip -d > ./media-proxy-rs
+curl -L https://github.com/cheripia-dev/media-proxy-rs/releases/download/nightly/media-proxy-rs_linux-amd64.gz | gzip -d > ./media-proxy-rs
 chmod u+x ./media-proxy-rs
 ./media-proxy-rs
 ```
@@ -41,7 +41,7 @@ media-proxy-rs_linux-riscv64.gz
 ## ビルド(x64 Docker)
 Dockerを使用する場合はbuildxとqemuによるクロスコンパイルが利用できます  
 ビルド対象プラットフォームはtarget supportの項目を参照してください
-1. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
+1. `git clone https://github.com/cheripia-dev/media-proxy-rs && cd media-proxy-rs`
 2. `docker build -t media-proxy-rs .`
 
 ## ビルド(Docker aarch64等その他)
@@ -57,7 +57,7 @@ amd64ではデフォルトでx86-64-v3向けにビルドしますが、x86-64-v3
 すべてを静的に組み込むmusl系とは異なる共有ライブラリを必要とする場合があります
 1. https://www.rust-lang.org/ja/tools/install に従ってrustをインストール
 1. `apt-get install -y meson ninja-build pkg-config nasm git`
-2. `git clone https://github.com/yojo-art/media-proxy-rs && cd media-proxy-rs`
+2. `git clone https://github.com/cheripia-dev/media-proxy-rs && cd media-proxy-rs`
 3. `cargo build --release`
 
 ## Node.js バインディング (napi)
