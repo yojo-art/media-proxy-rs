@@ -199,7 +199,7 @@ jobs:
         run: |
           gzip -k media-proxy-rs
       - name: Upload release asset
-        if: github.repository == 'yojo-art/media-proxy-rs'
+        if: github.repository == 'cheripia-dev/media-proxy-rs'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
