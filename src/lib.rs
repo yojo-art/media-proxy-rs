@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 mod avif_seq;
 #[cfg(feature = "server")]
 pub mod browsersafe;
+mod color;
 mod image_test;
 pub(crate) mod img;
 mod mng;
@@ -319,7 +320,7 @@ impl Processor {
 			self.cfg.max_decode_pixels,
 		)
 		.map_err(|()| ProcessError::new(ProcessErrorKind::Decode, "svg render failed"))?;
-		crate::img::response_img(img, src, None, opts, &self.cfg)
+		crate::img::response_img(img, src, None, opts, &self.cfg, None)
 	}
 }
 
@@ -661,5 +662,325 @@ mod tests {
 		});
 		let encoded = processor.process(svg, &ProcessOptions::default()).unwrap();
 		assert_eq!(encoded.content_type, "image/webp");
+	}
+	fn rgb_icc_profile() -> Vec<u8> {
+		use lcms2::{CIExyY, CIExyYTRIPLE, ToneCurve};
+		// Adobe RGB 相当のプロファイル。sRGB とは緑の原色が異なる。
+		let white = CIExyY {
+			x: 0.3127,
+			y: 0.3290,
+			Y: 1.0,
+		};
+		let primaries = CIExyYTRIPLE {
+			Red: CIExyY {
+				x: 0.64,
+				y: 0.33,
+				Y: 1.0,
+			},
+			Green: CIExyY {
+				x: 0.21,
+				y: 0.71,
+				Y: 1.0,
+			},
+			Blue: CIExyY {
+				x: 0.15,
+				y: 0.06,
+				Y: 1.0,
+			},
+		};
+		let curve = ToneCurve::new(2.2);
+		let curves = [&curve, &curve, &curve];
+		lcms2::Profile::new_rgb(&white, &primaries, &curves)
+			.unwrap()
+			.icc()
+			.unwrap()
+	}
+
+	fn gray_icc_profile() -> Vec<u8> {
+		use lcms2::{CIExyY, ToneCurve};
+		let white = CIExyY {
+			x: 0.3127,
+			y: 0.3290,
+			Y: 1.0,
+		};
+		let curve = ToneCurve::new(2.2);
+		lcms2::Profile::new_gray(&white, &curve)
+			.unwrap()
+			.icc()
+			.unwrap()
+	}
+
+	fn png_with_icc(
+		data: &[u8],
+		width: u32,
+		height: u32,
+		color: image::ExtendedColorType,
+		icc: &[u8],
+	) -> Vec<u8> {
+		use image::ImageEncoder;
+		let mut out = vec![];
+		let mut encoder = image::codecs::png::PngEncoder::new(&mut out);
+		encoder.set_icc_profile(icc.to_vec()).unwrap();
+		encoder.write_image(data, width, height, color).unwrap();
+		out
+	}
+
+	fn jpeg_with_icc(img: &image::RgbImage, icc: &[u8]) -> Vec<u8> {
+		use image::ImageEncoder;
+		let mut out = vec![];
+		let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 95);
+		encoder.set_icc_profile(icc.to_vec()).unwrap();
+		encoder
+			.write_image(
+				img.as_raw(),
+				img.width(),
+				img.height(),
+				image::ExtendedColorType::Rgb8,
+			)
+			.unwrap();
+		out
+	}
+
+	fn webp_icc(bytes: &[u8]) -> Option<Vec<u8>> {
+		use image::ImageDecoder;
+		let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).unwrap();
+		decoder.icc_profile().unwrap()
+	}
+
+	fn png_icc(bytes: &[u8]) -> Option<Vec<u8>> {
+		use image::ImageDecoder;
+		let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).unwrap();
+		decoder.icc_profile().unwrap()
+	}
+
+	#[test]
+	fn process_lossless_preserves_icc_profile() {
+		let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([32, 200, 64, 255]));
+		let icc = rgb_icc_profile();
+		let src = png_with_icc(
+			img.as_raw(),
+			img.width(),
+			img.height(),
+			image::ExtendedColorType::Rgba8,
+			&icc,
+		);
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/webp");
+		assert_eq!(webp_icc(&encoded.bytes).as_deref(), Some(icc.as_slice()));
+		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::WebP)
+			.unwrap()
+			.into_rgba8();
+		assert_eq!(decoded, img);
+	}
+
+	#[test]
+	fn process_lossless_preserves_icc_profile_in_png() {
+		let img = image::GrayImage::from_pixel(8, 8, image::Luma([123]));
+		let icc = gray_icc_profile();
+		let src = png_with_icc(
+			img.as_raw(),
+			img.width(),
+			img.height(),
+			image::ExtendedColorType::L8,
+			&icc,
+		);
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/png");
+		assert_eq!(png_icc(&encoded.bytes).as_deref(), Some(icc.as_slice()));
+		let decoded =
+			image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::Png).unwrap();
+		assert_eq!(decoded.into_luma8(), img);
+	}
+
+	#[test]
+	fn process_lossless_preserves_jpeg_icc_profile() {
+		let img = image::RgbImage::from_pixel(8, 8, image::Rgb([32, 200, 64]));
+		let icc = rgb_icc_profile();
+		let src = jpeg_with_icc(&img, &icc);
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/webp");
+		assert_eq!(webp_icc(&encoded.bytes).as_deref(), Some(icc.as_slice()));
+	}
+
+	#[test]
+	fn process_lossy_converts_icc_to_srgb() {
+		let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([32, 200, 64, 255]));
+		let icc = rgb_icc_profile();
+		let src = png_with_icc(
+			img.as_raw(),
+			img.width(),
+			img.height(),
+			image::ExtendedColorType::Rgba8,
+			&icc,
+		);
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					webp_quality: Some(100.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/webp");
+		assert_eq!(webp_icc(&encoded.bytes), None);
+		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::WebP)
+			.unwrap()
+			.into_rgba8();
+		let expected = crate::color::convert_to_srgb(DynamicImage::ImageRgba8(img.clone()), &icc)
+			.unwrap()
+			.into_rgba8();
+		assert_ne!(expected, img);
+		for (actual, expected) in decoded.pixels().zip(expected.pixels()) {
+			for channel in 0..4 {
+				let diff = (actual.0[channel] as i32 - expected.0[channel] as i32).abs();
+				assert!(diff <= 8, "{actual:?} vs {expected:?}");
+			}
+		}
+	}
+	#[test]
+	fn process_lossy_converts_gray_icc_to_srgb() {
+		let img = image::GrayImage::from_pixel(8, 8, image::Luma([123]));
+		let icc = gray_icc_profile();
+		let src = png_with_icc(
+			img.as_raw(),
+			img.width(),
+			img.height(),
+			image::ExtendedColorType::L8,
+			&icc,
+		);
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					webp_quality: Some(100.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::WebP)
+			.unwrap()
+			.into_rgba8();
+		let expected = crate::color::convert_to_srgb(DynamicImage::ImageLuma8(img), &icc)
+			.unwrap()
+			.into_rgba8();
+		assert_eq!(decoded.get_pixel(0, 0).0[3], 255);
+		for (actual, expected) in decoded.pixels().zip(expected.pixels()) {
+			for channel in 0..4 {
+				let diff = (actual.0[channel] as i32 - expected.0[channel] as i32).abs();
+				assert!(diff <= 8, "{actual:?} vs {expected:?}");
+			}
+		}
+	}
+	#[test]
+	fn process_lossy_converts_gray16_icc_to_srgb() {
+		let img = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_pixel(
+			8,
+			8,
+			image::Luma([12345u16]),
+		);
+		let raw: Vec<u8> = img
+			.as_raw()
+			.iter()
+			.flat_map(|value| value.to_ne_bytes())
+			.collect();
+		let icc = gray_icc_profile();
+		let src = png_with_icc(
+			&raw,
+			img.width(),
+			img.height(),
+			image::ExtendedColorType::L16,
+			&icc,
+		);
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&src,
+				&ProcessOptions {
+					webp_quality: Some(100.0),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let decoded = image::load_from_memory_with_format(&encoded.bytes, image::ImageFormat::WebP)
+			.unwrap()
+			.into_rgba8();
+		let expected = crate::color::convert_to_srgb(DynamicImage::ImageLuma16(img), &icc)
+			.unwrap()
+			.into_rgba8();
+		for (actual, expected) in decoded.pixels().zip(expected.pixels()) {
+			for channel in 0..4 {
+				let diff = (actual.0[channel] as i32 - expected.0[channel] as i32).abs();
+				assert!(diff <= 8, "{actual:?} vs {expected:?}");
+			}
+		}
+	}
+	#[test]
+	fn process_lossless_animation_preserves_icc_profile() {
+		let icc = rgb_icc_profile();
+		let frame = image::RgbaImage::from_pixel(8, 8, image::Rgba([32, 200, 64, 255]));
+		let mut config = webp::WebPConfig::new().unwrap();
+		config.lossless = 1;
+		let mut encoder = webp::AnimEncoder::new(8, 8, &config);
+		encoder.set_loop_count(0);
+		let first_img = DynamicImage::ImageRgba8(frame.clone());
+		let second_img = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+			8,
+			8,
+			image::Rgba([200, 32, 64, 255]),
+		));
+		let first = crate::img::image_to_frame(&first_img, 0).unwrap();
+		let second = crate::img::image_to_frame(&second_img, 100).unwrap();
+		encoder.add_frame(first).unwrap();
+		encoder.add_frame(second).unwrap();
+		let source = crate::color::embed_webp_icc(&encoder.encode(), &icc).unwrap();
+		assert_eq!(webp_icc(&source).as_deref(), Some(icc.as_slice()));
+		assert!(image::codecs::webp::WebPDecoder::new(Cursor::new(&source))
+			.unwrap()
+			.has_animation());
+
+		let processor = Processor::new(ProcessorConfig::default());
+		let encoded = processor
+			.process(
+				&source,
+				&ProcessOptions {
+					lossless: true,
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert_eq!(encoded.content_type, "image/webp");
+		assert_eq!(webp_icc(&encoded.bytes).as_deref(), Some(icc.as_slice()));
+		let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&encoded.bytes)).unwrap();
+		assert!(decoder.has_animation());
 	}
 }

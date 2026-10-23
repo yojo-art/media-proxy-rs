@@ -2004,6 +2004,7 @@ dependencies = [
  "jpeg2k",
  "jpegxr",
  "jxl-oxide",
+ "lcms2",
  "lru",
  "mailparse",
  "mp4parse",
