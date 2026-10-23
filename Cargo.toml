@@ -50,6 +50,7 @@ rexif = "0.7"
 avif-decoder_dep = { path = "./avif-decoder_dep", optional = true }
 chrono = { version = "0.4", optional = true }
 fast_image_resize = "6.1"
+lcms2 = "6.2"
 jxl-oxide = { version = "0.12.6", features = ["image", "lcms2"] }
 jpeg2k = { version = "0.10.1", default-features = false, features = ["image", "openjp2"] }
 jpegxr = { git = "https://github.com/kozakura913/jpegxr", rev = "0cc3d7a5f33adbcc0aea402af5758905391db0f4" }

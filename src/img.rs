@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::time::Duration;
 
-use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView};
+use image::{AnimationDecoder, DynamicImage, GenericImage, GenericImageView, ImageEncoder};
 
 use crate::{Encoded, ProcessError, ProcessErrorKind, ProcessOptions, ProcessorConfig};
 
@@ -329,35 +329,36 @@ pub(crate) fn encode_raster(
 			));
 		}
 	}
+	let icc = crate::color::extract_raster_icc(src, codec);
 	if opts.r#static || opts.badge {
-		return encode_single(src, opts, cfg, codec);
+		return encode_single(src, opts, cfg, codec, icc);
 	}
 	match codec {
 		image::ImageFormat::Png => {
 			let a = match image::codecs::png::PngDecoder::new(Cursor::new(src)) {
 				Ok(a) => a,
-				Err(_) => return encode_single(src, opts, cfg, codec),
+				Err(_) => return encode_single(src, opts, cfg, codec, icc),
 			};
 			if !a.is_apng().unwrap_or(false) {
-				return encode_single(src, opts, cfg, codec);
+				return encode_single(src, opts, cfg, codec, icc);
 			}
 			png_apng_within_budget(src, cfg.max_decode_pixels).map_err(map_budget_err)?;
 			match a.apng() {
-				Ok(frames) => encode_anim(frames.into_frames(), 0, opts, cfg),
-				Err(_) => encode_single(src, opts, cfg, codec),
+				Ok(frames) => encode_anim(frames.into_frames(), 0, opts, cfg, icc),
+				Err(_) => encode_single(src, opts, cfg, codec, icc),
 			}
 		}
 		image::ImageFormat::Gif => {
 			gif_animation_within_budget(src, cfg.max_decode_pixels).map_err(map_budget_err)?;
 			match image::codecs::gif::GifDecoder::new(Cursor::new(src)) {
-				Ok(a) => encode_anim(a.into_frames(), 0, opts, cfg),
-				Err(_) => encode_single(src, opts, cfg, codec),
+				Ok(a) => encode_anim(a.into_frames(), 0, opts, cfg, icc),
+				Err(_) => encode_single(src, opts, cfg, codec, icc),
 			}
 		}
 		image::ImageFormat::WebP => {
 			let a = match image::codecs::webp::WebPDecoder::new(Cursor::new(src)) {
 				Ok(a) => a,
-				Err(_) => return encode_single(src, opts, cfg, codec),
+				Err(_) => return encode_single(src, opts, cfg, codec, icc),
 			};
 			if a.has_animation() {
 				webp_animation_within_budget(src, cfg.max_decode_pixels).map_err(map_budget_err)?;
@@ -403,17 +404,17 @@ pub(crate) fn encode_raster(
 						frames.push(Ok(frame));
 					}
 					let frames = image::Frames::new(Box::new(frames.into_iter()));
-					encode_anim(frames, dec.loop_count, opts, cfg)
+					encode_anim(frames, dec.loop_count, opts, cfg, icc)
 				} else {
-					encode_anim(a.into_frames(), 0, opts, cfg)
+					encode_anim(a.into_frames(), 0, opts, cfg, icc)
 				}
 			} else {
-				encode_single(src, opts, cfg, codec)
+				encode_single(src, opts, cfg, codec, icc)
 			}
 		}
 		#[cfg(feature = "avif-decoder")]
 		image::ImageFormat::Avif => encode_avif_seq(src, opts, cfg),
-		_ => encode_single(src, opts, cfg, codec),
+		_ => encode_single(src, opts, cfg, codec, icc),
 	}
 }
 
@@ -425,11 +426,19 @@ pub(crate) fn encode_jxl(
 	let mut image = jxl_oxide::JxlImage::builder()
 		.read(Cursor::new(src))
 		.map_err(|e| ProcessError::new(ProcessErrorKind::Decode, format!("JpegXL {:?}", e)))?;
-	if image.pixel_format().has_black() {
+	let has_black = image.pixel_format().has_black();
+	if has_black || !opts.lossless {
 		image.request_color_encoding(jxl_oxide::EnumColourEncoding::srgb(
 			jxl_oxide::RenderingIntent::Relative,
 		));
 	}
+	// 可逆出力では色変換せず、レンダリング結果を説明する ICC プロファイルを
+	// そのまま転送する。CMYK (has_black) は WebP で表現できないため変換する。
+	let icc = if opts.lossless && !has_black {
+		Some(image.rendered_icc())
+	} else {
+		None
+	};
 	let (w, h) = (image.width(), image.height());
 	if !dimensions_allowed_for(cfg.max_decode_pixels, w as u64, h as u64) {
 		return Err(ProcessError::new(
@@ -452,7 +461,7 @@ pub(crate) fn encode_jxl(
 		let img = jxl_render_to_image(&render).ok_or_else(|| {
 			ProcessError::new(ProcessErrorKind::Decode, "JpegXLUnsupportedPixelFormat")
 		})?;
-		return response_img(img, src, None, opts, cfg);
+		return response_img(img, src, None, opts, cfg, icc);
 	}
 	let canvas_pixels = (w as u64).saturating_mul(h as u64);
 	let frame_count = keyframes as u64;
@@ -502,7 +511,7 @@ pub(crate) fn encode_jxl(
 		));
 	}
 	let frames = image::Frames::new(Box::new(collected.into_iter()));
-	encode_anim(frames, loop_count, opts, cfg)
+	encode_anim(frames, loop_count, opts, cfg, icc)
 }
 
 #[cfg(feature = "avif-decoder")]
@@ -523,7 +532,8 @@ pub(crate) fn encode_avif_seq(
 			let img = image::load_from_memory_with_format(src, image::ImageFormat::Avif).map_err(
 				|e| ProcessError::new(ProcessErrorKind::Decode, format!("AvifError {:?}", e)),
 			)?;
-			return response_img(img, src, Some(image::ImageFormat::Avif), opts, cfg);
+			let icc = crate::color::extract_raster_icc(src, image::ImageFormat::Avif);
+			return response_img(img, src, Some(image::ImageFormat::Avif), opts, cfg, icc);
 		}
 		Err(e) => {
 			return Err(ProcessError::new(
@@ -539,7 +549,14 @@ pub(crate) fn encode_avif_seq(
 				"NoAvailableFrames",
 			));
 		};
-		return response_img(DynamicImage::ImageRgba8(frame.image), src, None, opts, cfg);
+		return response_img(
+			DynamicImage::ImageRgba8(frame.image),
+			src,
+			None,
+			opts,
+			cfg,
+			None,
+		);
 	}
 	let collected: Vec<Result<image::Frame, image::ImageError>> = seq
 		.frames
@@ -551,7 +568,7 @@ pub(crate) fn encode_avif_seq(
 		})
 		.collect();
 	let frames = image::Frames::new(Box::new(collected.into_iter()));
-	encode_anim(frames, 0, opts, cfg)
+	encode_anim(frames, 0, opts, cfg, None)
 }
 
 pub(crate) fn encode_mng(
@@ -575,6 +592,7 @@ pub(crate) fn encode_mng(
 				None,
 				opts,
 				cfg,
+				None,
 			);
 		}
 		return Err(ProcessError::new(
@@ -584,7 +602,7 @@ pub(crate) fn encode_mng(
 	}
 	let loop_count = anim.loop_count;
 	let frames = image::Frames::new(Box::new(anim.frames.into_iter().map(Ok)));
-	encode_anim(frames, loop_count, opts, cfg)
+	encode_anim(frames, loop_count, opts, cfg, None)
 }
 
 fn encode_single_avif(rgba: image::RgbaImage) -> Result<Encoded, ProcessError> {
@@ -619,6 +637,7 @@ pub(crate) fn encode_anim(
 	loop_count: u32,
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
+	icc: Option<Vec<u8>>,
 ) -> Result<Encoded, ProcessError> {
 	// AVIF は image crate 0.25 でアニメーションエンコード未対応のため、
 	// アニメーション入力は WebP アニメーションで出力する。
@@ -640,6 +659,16 @@ pub(crate) fn encode_anim(
 		if let Ok(frame) = frame {
 			timestamp += Duration::from(frame.delay()).as_millis() as i32;
 			let img = DynamicImage::ImageRgba8(frame.into_buffer());
+			let img = if !opts.lossless {
+				match icc.as_deref() {
+					Some(profile) => {
+						crate::color::convert_to_srgb(img, profile).unwrap_or_else(|img| img)
+					}
+					None => img,
+				}
+			} else {
+				img
+			};
 			let img = resize(img, opts, cfg)
 				.ok_or_else(|| ProcessError::new(ProcessErrorKind::Encode, "resize failed"))?;
 			if let Some((sw, sh)) = size {
@@ -676,9 +705,19 @@ pub(crate) fn encode_anim(
 			"NoAvailableFrames",
 		));
 	}
-	let buf = encoder.unwrap().encode();
+	let mut bytes = encoder.unwrap().encode().to_vec();
+	if opts.lossless {
+		if let Some(profile) = icc.as_deref() {
+			bytes = crate::color::embed_webp_icc(&bytes, profile).ok_or_else(|| {
+				ProcessError::new(
+					ProcessErrorKind::Unsupported,
+					"Cannot preserve ICC profile in RGB WebP output",
+				)
+			})?;
+		}
+	}
 	Ok(Encoded {
-		bytes: buf.to_vec(),
+		bytes,
 		content_type: "image/webp",
 		ext: ".webp",
 		warning: add_frame_err,
@@ -690,6 +729,7 @@ pub(crate) fn encode_single(
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
 	codec: image::ImageFormat,
+	icc: Option<Vec<u8>>,
 ) -> Result<Encoded, ProcessError> {
 	let max_alloc = cfg.max_decode_pixels.saturating_mul(4);
 	let mut reader = image::ImageReader::with_format(Cursor::new(src), codec);
@@ -699,7 +739,7 @@ pub(crate) fn encode_single(
 	let img = reader
 		.decode()
 		.map_err(|e| ProcessError::new(ProcessErrorKind::Decode, format!("{:?}", e)))?;
-	response_img(img, src, Some(codec), opts, cfg)
+	response_img(img, src, Some(codec), opts, cfg, icc)
 }
 
 pub(crate) fn response_img(
@@ -708,10 +748,21 @@ pub(crate) fn response_img(
 	codec: Option<image::ImageFormat>,
 	opts: &ProcessOptions,
 	cfg: &ProcessorConfig,
+	icc: Option<Vec<u8>>,
 ) -> Result<Encoded, ProcessError> {
 	let img = match codec {
 		Some(image::ImageFormat::Jpeg) | Some(image::ImageFormat::Tiff) => exif_rotate(src, img),
 		_ => img,
+	};
+	// 非可逆出力では ICC プロファイルの色空間から sRGB へ変換する。
+	// 可逆出力ではピクセルを変更せず、プロファイルを出力側へ転送する。
+	let img = if !opts.lossless {
+		match icc.as_deref() {
+			Some(profile) => crate::color::convert_to_srgb(img, profile).unwrap_or_else(|img| img),
+			None => img,
+		}
+	} else {
+		img
 	};
 	// lossless 指定時、WebP 可逆圧縮でネイティブに表現できない入力
 	// (16bit 画像など) は PNG で出力し、ビット深度を維持する。
@@ -719,10 +770,15 @@ pub(crate) fn response_img(
 		let img = resize_lossless(img, opts, cfg)
 			.ok_or_else(|| ProcessError::new(ProcessErrorKind::Encode, "resize failed"))?;
 		let mut buf = vec![];
-		img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
-			.map_err(|e| {
-				ProcessError::new(ProcessErrorKind::Encode, format!("png encode {:?}", e))
+		let mut encoder = image::codecs::png::PngEncoder::new(&mut buf);
+		if let Some(profile) = icc.as_deref() {
+			encoder.set_icc_profile(profile.to_vec()).map_err(|e| {
+				ProcessError::new(ProcessErrorKind::Encode, format!("png icc {:?}", e))
 			})?;
+		}
+		img.write_with_encoder(encoder).map_err(|e| {
+			ProcessError::new(ProcessErrorKind::Encode, format!("png encode {:?}", e))
+		})?;
 		return Ok(Encoded {
 			bytes: buf,
 			content_type: "image/png",
@@ -762,8 +818,19 @@ pub(crate) fn response_img(
 		let mem = encoder.encode_advanced(&config).map_err(|e| {
 			ProcessError::new(ProcessErrorKind::Encode, format!("webp encode {:?}", e))
 		})?;
+		let mut bytes = mem.to_vec();
+		if opts.lossless {
+			if let Some(profile) = icc.as_deref() {
+				bytes = crate::color::embed_webp_icc(&bytes, profile).ok_or_else(|| {
+					ProcessError::new(
+						ProcessErrorKind::Unsupported,
+						"Cannot preserve ICC profile in RGB WebP output",
+					)
+				})?;
+			}
+		}
 		Ok(Encoded {
-			bytes: mem.to_vec(),
+			bytes,
 			content_type: "image/webp",
 			ext: ".webp",
 			warning: None,
@@ -908,7 +975,7 @@ pub(crate) fn encode_jp2(
 		.map_err(|e| ProcessError::new(ProcessErrorKind::Decode, format!("{:?}", e)))?;
 	let img = DynamicImage::try_from(&img)
 		.map_err(|e| ProcessError::new(ProcessErrorKind::Decode, format!("{:?}", e)))?;
-	response_img(img, src, None, opts, cfg)
+	response_img(img, src, None, opts, cfg, None)
 }
 
 pub(crate) fn encode_jxr(
@@ -949,7 +1016,7 @@ pub(crate) fn encode_jxr(
 		}))
 	}
 	match decode_jxr(src, cfg.max_decode_pixels) {
-		Ok(Ok(img)) => response_img(img, src, None, opts, cfg),
+		Ok(Ok(img)) => response_img(img, src, None, opts, cfg, None),
 		Ok(Err(e)) => Err(ProcessError::new(
 			ProcessErrorKind::DecodeLimit,
 			format!("JpegXR decode pixels {:?}", e),
@@ -1222,7 +1289,7 @@ mod tests {
 		let frames: Vec<_> = (0..ANIMATION_FRAMES_LIMIT).map(|_| make_frame()).collect();
 		let frames = image::Frames::new(Box::new(frames.into_iter()));
 		let (cfg, opts) = test_config_opts(1_000_000);
-		let resp = encode_anim(frames, 0, &opts, &cfg);
+		let resp = encode_anim(frames, 0, &opts, &cfg, None);
 		assert!(resp.is_ok(), "{:?}", resp);
 	}
 	#[test]
@@ -1232,7 +1299,7 @@ mod tests {
 			.collect();
 		let frames = image::Frames::new(Box::new(frames.into_iter()));
 		let (cfg, opts) = test_config_opts(1_000_000);
-		let err = encode_anim(frames, 0, &opts, &cfg).unwrap_err();
+		let err = encode_anim(frames, 0, &opts, &cfg, None).unwrap_err();
 		assert_eq!(err.kind, ProcessErrorKind::DecodeLimit);
 		assert!(err
 			.message
