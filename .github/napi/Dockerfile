@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# glibc 2.28 基準 (Node.js の Linux 最低要件) で NAPI バイナリをビルドする。
-# x86_64 / aarch64 の両方を同じ Dockerfile で扱い、stage target で切り替える。
+# glibc 2.28 基準 (Node.js の Linux 最低要件) の gnu と、musl (Alpine など) の
+# NAPI バイナリをビルドする。x86_64 / aarch64 を同じ Dockerfile で扱い、
+# stage target で切り替える。musl は amd64 (glibc) ホストからのクロスビルド。
 
 ARG BASE=debian:buster-slim
 # 再現性のため Rust の版を固定する。上げる場合は napi/ の `npm ci` で入る
@@ -204,3 +205,178 @@ FROM scratch AS out-aarch64
 COPY --from=build-aarch64 /media-proxy-napi.linux-arm64-gnu.node /media-proxy-napi.linux-arm64-gnu.node
 COPY --from=build-aarch64 /build/napi/index.js /index.js
 COPY --from=build-aarch64 /build/napi/index.d.ts /index.d.ts
+
+# -----------------------------------------------------------------------------
+# musl クロスビルド (amd64/glibc ホストから x86_64 / aarch64 musl へ)
+# -----------------------------------------------------------------------------
+# QEMU での arm64 ビルドは遅いため、amd64 (glibc) ホストからクロスする。
+# ホストが glibc なので、build script (bindgen 等) は通常どおり動的リンクされ
+# libclang を dlopen できる。gnu 用の build-aarch64 と同じく、各ビルド
+# ステージそれぞれの内部で自分のターゲット用クロスツールチェーンを用意する
+# (ステージ間でのツールチェーンの使い回しはしない)。
+# ツールチェーンは richfelker/musl-cross-make をソースからビルドする。
+# リビジョンを固定しているので、更新時は REV と動作確認をセットで行うこと。
+
+# -----------------------------------------------------------------------------
+# x86_64 musl 用クロスビルド
+# -----------------------------------------------------------------------------
+FROM build-base AS build-x86_64-musl
+
+ARG MUSL_CROSS_MAKE_REV=5e8042e63de29f8473fc3b0b831a587ba284e1a8
+RUN git clone https://github.com/richfelker/musl-cross-make.git /tmp/musl-cross-make \
+    && cd /tmp/musl-cross-make \
+    && git checkout ${MUSL_CROSS_MAKE_REV} \
+    && printf 'OUTPUT = /musl\nDL_CMD = curl -C - -L -o\n' > config.mak \
+    && make -j$(nproc) TARGET=x86_64-linux-musl \
+    && make TARGET=x86_64-linux-musl install \
+    && rm -rf /tmp/musl-cross-make
+
+# インストール先を確認する。musl-cross-make はバイナリを /musl/bin、
+# sysroot を /musl/<target> に置く。
+RUN /musl/bin/x86_64-linux-musl-gcc --version
+
+ARG DAV1D_VERSION
+ARG LCMS2_VERSION
+ARG TARGET=x86_64-unknown-linux-musl
+
+RUN rustup target add ${TARGET}
+
+ENV PATH="/musl/bin:${PATH}"
+ENV CC=x86_64-linux-musl-gcc
+ENV CXX=x86_64-linux-musl-g++
+ENV AR=x86_64-linux-musl-ar
+ENV RUSTFLAGS="-C linker=x86_64-linux-musl-gcc -C target-feature=-crt-static -C link-args=-Wl,-lc"
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+ENV BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/musl/x86_64-linux-musl"
+ENV PKG_CONFIG_LIBDIR=/tmp/napi-deps/dav1d/lib/pkgconfig:/tmp/napi-deps/lcms2/lib/pkgconfig
+ENV PKG_CONFIG_ALLOW_CROSS=1
+
+RUN tee /tmp/cross.txt <<'EOF'
+[binaries]
+c = 'x86_64-linux-musl-gcc'
+cpp = 'x86_64-linux-musl-g++'
+ar = 'x86_64-linux-musl-ar'
+pkgconfig = 'pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOF
+
+RUN DAV1D_VERSION=${DAV1D_VERSION} LCMS2_VERSION=${LCMS2_VERSION} build-deps.sh --cross-file /tmp/cross.txt
+
+COPY src ./src
+COPY Cargo.toml ./Cargo.toml
+COPY Cargo.lock ./Cargo.lock
+COPY asset ./asset
+COPY examples ./examples
+# ./napi は build-base で `npm ci` 済み。COPY はマージされるため node_modules は残る。
+COPY napi ./napi
+COPY avif-decoder_dep ./avif-decoder_dep
+
+RUN cd napi && npx napi build --release --platform --target ${TARGET} \
+    --manifest-path Cargo.toml --package-json-path package.json
+
+# glibc ではなく musl に動的リンクされていることを確かめる。
+# libgcc_s 由来の GLIBC_ バージョン参照は musl では無視されるため、
+# NEEDED に libc.so / libgcc_s.so.1 以外の共有ライブラリが無いことで判定する。
+RUN deps=$(readelf -d /build/napi/media-proxy-napi.linux-x64-musl.node \
+        | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); \
+    echo "NEEDED: ${deps}"; \
+    if [ -z "${deps}" ]; then \
+        echo "no NEEDED entry (not dynamically linked?)" >&2; exit 1; \
+    fi; \
+    if echo "${deps}" | grep -Ev '^(libc\.so|libgcc_s\.so\.1)$' | grep -q .; then \
+        echo "unexpected dynamic dependency" >&2; \
+        exit 1; \
+    fi
+
+RUN cp /build/napi/media-proxy-napi.linux-x64-musl.node /
+
+FROM scratch AS out-x86_64-musl
+COPY --from=build-x86_64-musl /media-proxy-napi.linux-x64-musl.node /media-proxy-napi.linux-x64-musl.node
+COPY --from=build-x86_64-musl /build/napi/index.js /index.js
+COPY --from=build-x86_64-musl /build/napi/index.d.ts /index.d.ts
+
+# -----------------------------------------------------------------------------
+# aarch64 musl 用クロスビルド
+# -----------------------------------------------------------------------------
+FROM build-base AS build-aarch64-musl
+
+ARG MUSL_CROSS_MAKE_REV=5e8042e63de29f8473fc3b0b831a587ba284e1a8
+RUN git clone https://github.com/richfelker/musl-cross-make.git /tmp/musl-cross-make \
+    && cd /tmp/musl-cross-make \
+    && git checkout ${MUSL_CROSS_MAKE_REV} \
+    && printf 'OUTPUT = /musl\nDL_CMD = curl -C - -L -o\n' > config.mak \
+    && make -j$(nproc) TARGET=aarch64-linux-musl \
+    && make TARGET=aarch64-linux-musl install \
+    && rm -rf /tmp/musl-cross-make
+
+RUN /musl/bin/aarch64-linux-musl-gcc --version
+
+ARG DAV1D_VERSION
+ARG LCMS2_VERSION
+ARG TARGET=aarch64-unknown-linux-musl
+
+RUN rustup target add ${TARGET}
+
+ENV PATH="/musl/bin:${PATH}"
+ENV CC=aarch64-linux-musl-gcc
+ENV CXX=aarch64-linux-musl-g++
+ENV AR=aarch64-linux-musl-ar
+ENV RUSTFLAGS="-C linker=aarch64-linux-musl-gcc -C target-feature=-crt-static -C link-args=-Wl,-lc"
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+ENV BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/musl/aarch64-linux-musl"
+ENV PKG_CONFIG_LIBDIR=/tmp/napi-deps/dav1d/lib/pkgconfig:/tmp/napi-deps/lcms2/lib/pkgconfig
+ENV PKG_CONFIG_ALLOW_CROSS=1
+
+RUN tee /tmp/cross.txt <<'EOF'
+[binaries]
+c = 'aarch64-linux-musl-gcc'
+cpp = 'aarch64-linux-musl-g++'
+ar = 'aarch64-linux-musl-ar'
+pkgconfig = 'pkg-config'
+
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+EOF
+
+RUN DAV1D_VERSION=${DAV1D_VERSION} LCMS2_VERSION=${LCMS2_VERSION} build-deps.sh --cross-file /tmp/cross.txt
+
+COPY src ./src
+COPY Cargo.toml ./Cargo.toml
+COPY Cargo.lock ./Cargo.lock
+COPY asset ./asset
+COPY examples ./examples
+# ./napi は build-base で `npm ci` 済み。COPY はマージされるため node_modules は残る。
+COPY napi ./napi
+COPY avif-decoder_dep ./avif-decoder_dep
+
+RUN cd napi && npx napi build --release --platform --target ${TARGET} \
+    --manifest-path Cargo.toml --package-json-path package.json
+
+# glibc ではなく musl に動的リンクされていることを確かめる。
+# libgcc_s 由来の GLIBC_ バージョン参照は musl では無視されるため、
+# NEEDED に libc.so / libgcc_s.so.1 以外の共有ライブラリが無いことで判定する。
+RUN deps=$(readelf -d /build/napi/media-proxy-napi.linux-arm64-musl.node \
+        | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); \
+    echo "NEEDED: ${deps}"; \
+    if [ -z "${deps}" ]; then \
+        echo "no NEEDED entry (not dynamically linked?)" >&2; exit 1; \
+    fi; \
+    if echo "${deps}" | grep -Ev '^(libc\.so|libgcc_s\.so\.1)$' | grep -q .; then \
+        echo "unexpected dynamic dependency" >&2; \
+        exit 1; \
+    fi
+
+RUN cp /build/napi/media-proxy-napi.linux-arm64-musl.node /
+
+FROM scratch AS out-aarch64-musl
+COPY --from=build-aarch64-musl /media-proxy-napi.linux-arm64-musl.node /media-proxy-napi.linux-arm64-musl.node
+COPY --from=build-aarch64-musl /build/napi/index.js /index.js
+COPY --from=build-aarch64-musl /build/napi/index.d.ts /index.d.ts

@@ -1,2 +1,3 @@
+target
 napi/node_modules
-*.node
+**/*.node

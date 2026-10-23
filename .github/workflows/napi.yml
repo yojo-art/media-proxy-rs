@@ -35,6 +35,13 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             platform: linux-arm64-gnu
             dockerfile_target: out-aarch64
+          # musl は amd64 ホストからクロスコンパイルする (QEMU は使わない)。
+          - target: x86_64-unknown-linux-musl
+            platform: linux-x64-musl
+            dockerfile_target: out-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            platform: linux-arm64-musl
+            dockerfile_target: out-aarch64-musl
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -59,7 +66,10 @@ jobs:
             DAV1D_VERSION=${{ env.DAV1D_VERSION }}
             LCMS2_VERSION=${{ env.LCMS2_VERSION }}
           outputs: type=local,dest=./napi-out
-          cache-from: type=gha,scope=napi-${{ matrix.target }}
+          cache-from: |
+            type=gha,scope=napi-${{ matrix.target }}
+            type=gha,scope=napi-x86_64-unknown-linux-musl
+            type=gha,scope=napi-aarch64-unknown-linux-musl
           cache-to: type=gha,mode=max,scope=napi-${{ matrix.target }}
 
       - name: Rename artifact
@@ -74,22 +84,9 @@ jobs:
           cp ./napi-out/index.js ./artifacts/index.js
           cp ./napi-out/index.d.ts ./artifacts/index.d.ts
 
-      - name: Smoke test (x86_64)
+      - name: Smoke test (native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: |
-          node -e '
-            const { MediaProcessor } = require("./artifacts/media-proxy-napi.${{ matrix.platform }}.node");
-            const fs = require("fs");
-            const png = fs.readFileSync("asset/dummy.png");
-            (async () => {
-              const p = new MediaProcessor();
-              const avatar = await p.process(png, { avatar: true });
-              if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
-              const badge = await p.process(png, { badge: true });
-              if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
-              console.log("x86_64 smoke test ok");
-            })().catch(e => { console.error(e); process.exit(1); });
-          '
+        run: node .github/napi/smoke-test.js "./artifacts/media-proxy-napi.${{ matrix.platform }}.node" asset/dummy.png "${{ matrix.platform }}"
 
       - name: Smoke test (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -97,20 +94,29 @@ jobs:
           docker run --rm --platform linux/arm64 \
             -v "$PWD/artifacts:/artifacts:ro" \
             -v "$PWD/asset/dummy.png:/dummy.png:ro" \
+            -v "$PWD/.github/napi/smoke-test.js:/smoke-test.js:ro" \
             node:22-slim \
-            node -e '
-              const { MediaProcessor } = require("/artifacts/media-proxy-napi.linux-arm64-gnu.node");
-              const fs = require("fs");
-              const png = fs.readFileSync("/dummy.png");
-              (async () => {
-                const p = new MediaProcessor();
-                const avatar = await p.process(png, { avatar: true });
-                if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
-                const badge = await p.process(png, { badge: true });
-                if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
-                console.log("aarch64 smoke test ok");
-              })().catch(e => { console.error(e); process.exit(1); });
-            '
+            node /smoke-test.js "/artifacts/media-proxy-napi.${{ matrix.platform }}.node" /dummy.png "${{ matrix.platform }}"
+
+      - name: Smoke test (x86_64-musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/artifacts:/artifacts:ro" \
+            -v "$PWD/asset/dummy.png:/dummy.png:ro" \
+            -v "$PWD/.github/napi/smoke-test.js:/smoke-test.js:ro" \
+            node:22-alpine \
+            node /smoke-test.js "/artifacts/media-proxy-napi.${{ matrix.platform }}.node" /dummy.png "${{ matrix.platform }}"
+
+      - name: Smoke test (aarch64-musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD/artifacts:/artifacts:ro" \
+            -v "$PWD/asset/dummy.png:/dummy.png:ro" \
+            -v "$PWD/.github/napi/smoke-test.js:/smoke-test.js:ro" \
+            node:22-alpine \
+            node /smoke-test.js "/artifacts/media-proxy-napi.${{ matrix.platform }}.node" /dummy.png "${{ matrix.platform }}"
 
       - name: Gzip artifact
         working-directory: artifacts
@@ -232,20 +238,7 @@ jobs:
           otool -l ./artifacts/media-proxy-napi.darwin-arm64.node | grep -A3 LC_BUILD_VERSION || true
 
       - name: Smoke test (native)
-        run: |
-          node -e '
-            const { MediaProcessor } = require("./artifacts/media-proxy-napi.darwin-arm64.node");
-            const fs = require("fs");
-            const png = fs.readFileSync("asset/dummy.png");
-            (async () => {
-              const p = new MediaProcessor();
-              const avatar = await p.process(png, { avatar: true });
-              if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
-              const badge = await p.process(png, { badge: true });
-              if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
-              console.log("darwin-arm64 smoke test ok");
-            })().catch(e => { console.error(e); process.exit(1); });
-          '
+        run: node .github/napi/smoke-test.js ./artifacts/media-proxy-napi.darwin-arm64.node asset/dummy.png darwin-arm64
 
       - name: Gzip artifact
         working-directory: artifacts
@@ -375,20 +368,7 @@ jobs:
 
       - name: Smoke test (native)
         shell: bash
-        run: |
-          node -e '
-            const { MediaProcessor } = require("./artifacts/media-proxy-napi.win32-x64-msvc.node");
-            const fs = require("fs");
-            const png = fs.readFileSync("asset/dummy.png");
-            (async () => {
-              const p = new MediaProcessor();
-              const avatar = await p.process(png, { avatar: true });
-              if (!avatar.contentType.includes("webp")) throw new Error("avatar should be webp: " + avatar.contentType);
-              const badge = await p.process(png, { badge: true });
-              if (!badge.contentType.includes("png")) throw new Error("badge should be png: " + badge.contentType);
-              console.log("win32-x64-msvc smoke test ok");
-            })().catch(e => { console.error(e); process.exit(1); });
-          '
+        run: node .github/napi/smoke-test.js ./artifacts/media-proxy-napi.win32-x64-msvc.node asset/dummy.png win32-x64-msvc
 
       - name: Gzip artifact
         shell: bash

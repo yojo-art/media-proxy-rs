@@ -68,6 +68,8 @@ amd64ではデフォルトでx86-64-v3向けにビルドしますが、x86-64-v3
 
 - `linux-x64-gnu` (glibc 2.28 以上)
 - `linux-arm64-gnu` (glibc 2.28 以上)
+- `linux-x64-musl` (Alpine など)
+- `linux-arm64-musl` (Alpine など)
 - `darwin-arm64` (macOS 11.0 以上)
 - `win32-x64-msvc` (Windows 10/11)
 
