@@ -23,14 +23,10 @@ pub(crate) fn convert_to_srgb(img: DynamicImage, icc: &[u8]) -> Result<DynamicIm
 		Err(_) => return Err(img),
 	};
 	let srgb = Profile::new_srgb();
-	let use_gray = input.color_space() == ColorSpaceSignature::GrayData
-		&& matches!(
-			img,
-			DynamicImage::ImageLuma8(_)
-				| DynamicImage::ImageLumaA8(_)
-				| DynamicImage::ImageLuma16(_)
-				| DynamicImage::ImageLumaA16(_)
-		);
+	// EXIF 回転やアニメーションデコードによって、
+	// Gray の画素が RGBA に展開されている場合もある。
+	// 入力プロファイルの色空間に合わせて Gray 入力を選択する。
+	let use_gray = input.color_space() == ColorSpaceSignature::GrayData;
 	let in_format = if use_gray {
 		PixelFormat::GRAYA_8
 	} else {
