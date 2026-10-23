@@ -214,7 +214,9 @@ COPY --from=build-aarch64 /build/napi/index.d.ts /index.d.ts
 # libclang を dlopen できる。
 # ツールチェーンは richfelker/musl-cross-make をソースからビルドする。
 # リビジョンを固定しているので、更新時は REV と動作確認をセットで行うこと。
-FROM build-base AS musl-toolchain
+# ジョブは自分のターゲットの gcc だけをビルドする (もう片方のアーキの
+# ソースビルドは不要なためステージを分けている)。
+FROM build-base AS musl-toolchain-x86_64
 
 ARG MUSL_CROSS_MAKE_REV=5e8042e63de29f8473fc3b0b831a587ba284e1a8
 RUN git clone https://github.com/richfelker/musl-cross-make.git /tmp/musl-cross-make \
@@ -223,19 +225,29 @@ RUN git clone https://github.com/richfelker/musl-cross-make.git /tmp/musl-cross-
     && printf 'OUTPUT = /musl\nDL_CMD = curl -C - -L -o\n' > config.mak \
     && make -j$(nproc) TARGET=x86_64-linux-musl \
     && make TARGET=x86_64-linux-musl install \
-    && make -j$(nproc) TARGET=aarch64-linux-musl \
-    && make TARGET=aarch64-linux-musl install \
     && rm -rf /tmp/musl-cross-make
 
 # インストール先を確認する。musl-cross-make はバイナリを /musl/bin、
 # sysroot を /musl/<target> に置く。
-RUN /musl/bin/x86_64-linux-musl-gcc --version \
-    && /musl/bin/aarch64-linux-musl-gcc --version
+RUN /musl/bin/x86_64-linux-musl-gcc --version
+
+FROM build-base AS musl-toolchain-aarch64
+
+ARG MUSL_CROSS_MAKE_REV=5e8042e63de29f8473fc3b0b831a587ba284e1a8
+RUN git clone https://github.com/richfelker/musl-cross-make.git /tmp/musl-cross-make \
+    && cd /tmp/musl-cross-make \
+    && git checkout ${MUSL_CROSS_MAKE_REV} \
+    && printf 'OUTPUT = /musl\nDL_CMD = curl -C - -L -o\n' > config.mak \
+    && make -j$(nproc) TARGET=aarch64-linux-musl \
+    && make TARGET=aarch64-linux-musl install \
+    && rm -rf /tmp/musl-cross-make
+
+RUN /musl/bin/aarch64-linux-musl-gcc --version
 
 # -----------------------------------------------------------------------------
 # x86_64 musl 用クロスビルド
 # -----------------------------------------------------------------------------
-FROM musl-toolchain AS build-x86_64-musl
+FROM musl-toolchain-x86_64 AS build-x86_64-musl
 
 ARG DAV1D_VERSION
 ARG LCMS2_VERSION
@@ -287,6 +299,9 @@ RUN cd napi && npx napi build --release --platform --target ${TARGET} \
 RUN deps=$(readelf -d /build/napi/media-proxy-napi.linux-x64-musl.node \
         | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); \
     echo "NEEDED: ${deps}"; \
+    if [ -z "${deps}" ]; then \
+        echo "no NEEDED entry (not dynamically linked?)" >&2; exit 1; \
+    fi; \
     if echo "${deps}" | grep -Ev '^(libc\.so|libgcc_s\.so\.1)$' | grep -q .; then \
         echo "unexpected dynamic dependency" >&2; \
         exit 1; \
@@ -302,7 +317,7 @@ COPY --from=build-x86_64-musl /build/napi/index.d.ts /index.d.ts
 # -----------------------------------------------------------------------------
 # aarch64 musl 用クロスビルド
 # -----------------------------------------------------------------------------
-FROM musl-toolchain AS build-aarch64-musl
+FROM musl-toolchain-aarch64 AS build-aarch64-musl
 
 ARG DAV1D_VERSION
 ARG LCMS2_VERSION
@@ -354,6 +369,9 @@ RUN cd napi && npx napi build --release --platform --target ${TARGET} \
 RUN deps=$(readelf -d /build/napi/media-proxy-napi.linux-arm64-musl.node \
         | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); \
     echo "NEEDED: ${deps}"; \
+    if [ -z "${deps}" ]; then \
+        echo "no NEEDED entry (not dynamically linked?)" >&2; exit 1; \
+    fi; \
     if echo "${deps}" | grep -Ev '^(libc\.so|libgcc_s\.so\.1)$' | grep -q .; then \
         echo "unexpected dynamic dependency" >&2; \
         exit 1; \
