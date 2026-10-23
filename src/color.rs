@@ -61,6 +61,12 @@ pub(crate) fn convert_to_srgb(img: DynamicImage, icc: &[u8]) -> Result<DynamicIm
 /// WebP の RIFF コンテナに ICCP チャンクを埋め込む。
 /// 既存の ICCP は置き換える。コンテナとして解釈できない場合は None を返す。
 pub(crate) fn embed_webp_icc(data: &[u8], icc: &[u8]) -> Option<Vec<u8>> {
+	// WebP の RGB/RGBA 画素に、Gray / CMYK などの
+	// 入力プロファイルをそのまま付与しない。
+	let profile = Profile::new_icc(icc).ok()?;
+	if profile.color_space() != ColorSpaceSignature::RgbData {
+		return None;
+	}
 	if icc.is_empty() || data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
 		return None;
 	}

@@ -708,9 +708,12 @@ pub(crate) fn encode_anim(
 	let mut bytes = encoder.unwrap().encode().to_vec();
 	if opts.lossless {
 		if let Some(profile) = icc.as_deref() {
-			if let Some(embedded) = crate::color::embed_webp_icc(&bytes, profile) {
-				bytes = embedded;
-			}
+			bytes = crate::color::embed_webp_icc(&bytes, profile).ok_or_else(|| {
+				ProcessError::new(
+					ProcessErrorKind::Unsupported,
+					"Cannot preserve ICC profile in RGB WebP output",
+				)
+			})?;
 		}
 	}
 	Ok(Encoded {
@@ -818,9 +821,12 @@ pub(crate) fn response_img(
 		let mut bytes = mem.to_vec();
 		if opts.lossless {
 			if let Some(profile) = icc.as_deref() {
-				if let Some(embedded) = crate::color::embed_webp_icc(&bytes, profile) {
-					bytes = embedded;
-				}
+				bytes = crate::color::embed_webp_icc(&bytes, profile).ok_or_else(|| {
+					ProcessError::new(
+						ProcessErrorKind::Unsupported,
+						"Cannot preserve ICC profile in RGB WebP output",
+					)
+				})?;
 			}
 		}
 		Ok(Encoded {
